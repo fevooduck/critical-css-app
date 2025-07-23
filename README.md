@@ -1,122 +1,121 @@
-# Critical CSS Generator
+# Batch Critical CSS Generator
 
-A functional Critical CSS generator that uses the actual `critical` library to extract above-the-fold CSS from websites.
+A high-performance Critical CSS generator that processes **multiple websites simultaneously** with maximum agility. Perfect for agencies, developers, and teams managing multiple sites.
 
-## Features
+## 🚀 Key Features
 
-- **Real Critical CSS Generation**: Uses the actual `critical` library
-- **Multiple Viewport Support**: Generate CSS for multiple device configurations
-- **Combined Dimensions**: Generate single CSS file optimized for multiple viewports
-- **Individual Generation**: Generate separate CSS files for each device
-- **Download & Copy**: Easy export of generated CSS
-- **Local Development**: Runs entirely on your local machine
+### **Batch Processing**
+- **Multiple URLs**: Process N websites simultaneously
+- **Controlled Concurrency**: Processes 3 URLs at a time to prevent server overload
+- **Progress Tracking**: Real-time progress updates for batch operations
+- **Error Resilience**: Individual URL failures don't stop the entire batch
 
-## Installation
+### **Flexible Generation Modes**
+- **Individual Mode**: Generate separate CSS files for each device configuration
+- **Combined Mode**: Generate single CSS file optimized for multiple viewports per URL
+- **Mixed Processing**: Different URLs can have different configurations
 
-1. Clone or download the project files
-2. Install dependencies:
-   \`\`\`bash
-   npm install
-   \`\`\`
+### **Advanced Export Options**
+- **Bulk Download**: Download all generated CSS files at once
+- **JSON Export**: Export complete batch results with metadata
+- **Organized Files**: Files named with hostname and configuration for easy identification
 
-## Usage
+## 📊 Performance & Scalability
 
-### Development Mode
-Run both the server and client in development mode:
+- **Concurrent Processing**: 3 URLs processed simultaneously
+- **Memory Efficient**: Automatic cleanup of old batch jobs
+- **Progress Monitoring**: Real-time updates on processing status
+- **Error Handling**: Detailed error reporting per URL and configuration
+
+## 🛠 Installation & Usage
+
+### Quick Start
 \`\`\`bash
+npm install
 npm run dev
 \`\`\`
 
-This will start:
-- Frontend server on `http://localhost:3000`
-- Backend API server on `http://localhost:3001`
-
-### Production Build
-\`\`\`bash
-npm run build
-npm start
-\`\`\`
-
-## API Usage
-
-### Generate Critical CSS for Multiple Dimensions (Combined)
+### Batch Processing Example
 \`\`\`javascript
-// Example: Generate single CSS for multiple viewports
-const response = await fetch('/api/critical', {
+// Process 5 websites with 3 device configurations each
+const response = await fetch('/api/critical/batch', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    url: 'https://example.com',
-    combineDimensions: true,
-    configs: [
-      { width: 500, height: 200, device: 'mobile', name: 'Mobile' },
-      { width: 1200, height: 900, device: 'desktop', name: 'Desktop' }
-    ]
-  })
-});
-\`\`\`
-
-### Generate Individual CSS Files
-\`\`\`javascript
-// Example: Generate separate CSS for each viewport
-const response = await fetch('/api/critical', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    url: 'https://example.com',
-    combineDimensions: false,
+    urls: [
+      'https://example.com',
+      'https://github.com',
+      'https://stackoverflow.com',
+      'https://developer.mozilla.org',
+      'https://css-tricks.com'
+    ],
     configs: [
       { width: 375, height: 667, device: 'mobile', name: 'iPhone SE' },
-      { width: 1920, height: 1080, device: 'desktop', name: 'Desktop HD' }
-    ]
+      { width: 1920, height: 1080, device: 'desktop', name: 'Desktop HD' },
+      { width: 768, height: 1024, device: 'desktop', name: 'iPad Portrait' }
+    ],
+    combineDimensions: false // Generate individual CSS files
   })
 });
 \`\`\`
 
-## Critical Library Configuration
+## 🎯 Use Cases
 
-The server uses the following critical library configuration:
+### **Agency Workflows**
+- Process all client websites in one batch
+- Generate critical CSS for entire portfolios
+- Standardize performance optimizations across projects
 
-\`\`\`javascript
-await critical.generate({
-  base: '',
-  src: url,
-  dimensions: [
-    { width: 500, height: 200 },
-    { width: 1200, height: 900 }
-  ], // For combined mode
-  // OR
-  width: 1920,
-  height: 1080, // For individual mode
-  inline: false,
-  extract: false,
-  timeout: 30000,
-  penthouse: {
-    timeout: 30000,
-  },
-  ignore: {
-    atrule: ['@font-face'],
-    rule: [/some-regexp/],
-    decl: (node, value) => /big-image\.png/.test(value)
-  }
-});
+### **Multi-Site Management**
+- E-commerce sites with multiple domains
+- Corporate websites with regional variations
+- Development teams managing multiple projects
+
+### **Performance Audits**
+- Batch analyze competitor websites
+- Generate critical CSS for A/B testing
+- Performance optimization campaigns
+
+## 📈 Batch Processing Benefits
+
+1. **Time Efficiency**: Process 10+ websites in the time it takes to do 1
+2. **Consistency**: Same configurations applied across all URLs
+3. **Automation Ready**: JSON export for CI/CD integration
+4. **Resource Optimization**: Controlled concurrency prevents server overload
+5. **Error Resilience**: Individual failures don't stop the entire batch
+
+## 🔧 API Endpoints
+
+### Batch Processing
+\`\`\`
+POST /api/critical/batch
 \`\`\`
 
-## Environment Requirements
+### Job Status Monitoring
+\`\`\`
+GET /api/critical/batch/:jobId
+\`\`\`
 
-- Node.js 16+ (required for the critical library)
-- Modern browser with ES6+ support
-- Internet connection (for analyzing external websites)
+### Single URL (Backward Compatibility)
+\`\`\`
+POST /api/critical
+\`\`\`
 
-## Troubleshooting
+## 📋 Sample Batch Configuration
 
-1. **Port conflicts**: Change ports in `server.js` and `vite.config.js`
-2. **Critical library errors**: Ensure you're running Node.js 16+
-3. **CORS issues**: The server includes CORS middleware for cross-origin requests
-4. **Timeout errors**: Increase timeout values in the critical configuration
+The interface includes a "Load Samples" button that populates with:
+- example.com
+- github.com
+- stackoverflow.com
+- developer.mozilla.org
+- css-tricks.com
 
-## Performance Tips
+Perfect for testing and demonstration purposes.
 
-- Use combined dimensions mode for better performance when targeting multiple viewports
-- Set appropriate timeouts based on website complexity
-- Consider ignoring non-critical CSS rules using the `ignore` configuration
+## 🎛 Advanced Features
+
+- **Job Tracking**: Monitor batch progress with unique job IDs
+- **Automatic Cleanup**: Old batch jobs cleaned up hourly
+- **Health Monitoring**: Server health endpoint with active job count
+- **Flexible Timeouts**: Configurable timeouts per URL
+- **Ignore Patterns**: Custom CSS ignore rules for optimization

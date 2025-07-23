@@ -12,33 +12,77 @@ const presetConfigs = {
 
 // State management
 const state = {
-  url: "https://example.com",
+  urls: ["https://example.com", "https://github.com"],
   selectedConfigs: ["desktop-1920", "mobile-375"],
   results: [],
   isLoading: false,
   error: "",
   combineDimensions: false,
+  batchProgress: null,
+  currentJobId: null,
 }
 
 // Utility functions
 function showToast(message, type = "success") {
   const toast = document.createElement("div")
   toast.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
-    type === "success" ? "bg-green-500 text-white" : "bg-red-500 text-white"
+    type === "success"
+      ? "bg-green-500 text-white"
+      : type === "info"
+        ? "bg-blue-500 text-white"
+        : "bg-red-500 text-white"
   }`
   toast.textContent = message
   document.body.appendChild(toast)
 
   setTimeout(() => {
     toast.remove()
-  }, 3000)
+  }, 4000)
 }
 
 function formatFileSize(bytes) {
   return Math.round(bytes / 1024) + "KB"
 }
 
-// Event handlers
+function formatTime(ms) {
+  const seconds = Math.floor(ms / 1000)
+  const minutes = Math.floor(seconds / 60)
+  if (minutes > 0) {
+    return `${minutes}m ${seconds % 60}s`
+  }
+  return `${seconds}s`
+}
+
+// URL management
+function addUrl() {
+  state.urls.push("")
+  render()
+}
+
+function removeUrl(index) {
+  if (state.urls.length > 1) {
+    state.urls.splice(index, 1)
+    render()
+  }
+}
+
+function updateUrl(index, value) {
+  state.urls[index] = value
+  render()
+}
+
+function loadSampleUrls() {
+  state.urls = [
+    "https://example.com",
+    "https://github.com",
+    "https://stackoverflow.com",
+    "https://developer.mozilla.org",
+    "https://css-tricks.com",
+  ]
+  render()
+}
+
+// Configuration management
 function handleConfigToggle(configKey) {
   if (state.selectedConfigs.includes(configKey)) {
     state.selectedConfigs = state.selectedConfigs.filter((key) => key !== configKey)
@@ -68,9 +112,12 @@ function selectAllMobile() {
   render()
 }
 
-async function handleGenerate() {
-  if (!state.url) {
-    state.error = "Please enter a valid URL"
+// Batch processing
+async function handleBatchGenerate() {
+  const validUrls = state.urls.filter((url) => url.trim() !== "")
+
+  if (validUrls.length === 0) {
+    state.error = "Please enter at least one valid URL"
     render()
     return
   }
@@ -84,20 +131,26 @@ async function handleGenerate() {
   state.isLoading = true
   state.error = ""
   state.results = []
+  state.batchProgress = { completed: 0, total: validUrls.length }
   render()
 
   try {
     const configs = state.selectedConfigs.map((key) => presetConfigs[key])
+    const jobId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    state.currentJobId = jobId
 
-    const response = await fetch("/api/critical", {
+    showToast(`Starting batch processing of ${validUrls.length} URLs...`, "info")
+
+    const response = await fetch("/api/critical/batch", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        url: state.url,
+        urls: validUrls,
         configs,
         combineDimensions: state.combineDimensions,
+        batchId: jobId,
       }),
     })
 
@@ -108,53 +161,168 @@ async function handleGenerate() {
     }
 
     state.results = data.results
+    state.batchProgress = null
 
-    const successCount = data.results.filter((r) => r.success).length
-    const totalCount = data.results.length
-
-    showToast(`Generation Complete! ${successCount}/${totalCount} configurations processed successfully`)
+    const { summary } = data
+    showToast(
+      `Batch Complete! ${summary.successfulUrls}/${summary.totalUrls} URLs processed, ${summary.successfulConfigs} CSS files generated in ${formatTime(summary.processingTime)}`,
+    )
   } catch (err) {
     state.error = err.message
     showToast(err.message, "error")
   } finally {
     state.isLoading = false
+    state.currentJobId = null
     render()
   }
 }
 
-async function handleCopy(css, configName) {
+// Export functions
+async function handleCopy(css, configName, url) {
   try {
     await navigator.clipboard.writeText(css)
-    showToast(`${configName} CSS copied to clipboard`)
+    showToast(`${configName} CSS from ${new URL(url).hostname} copied to clipboard`)
   } catch (err) {
     showToast("Failed to copy to clipboard", "error")
   }
 }
 
-function handleDownload(css, configName) {
+function handleDownload(css, configName, url) {
+  const hostname = new URL(url).hostname.replace(/\./g, "-")
   const blob = new Blob([css], { type: "text/css" })
+  const downloadUrl = URL.createObjectURL(blob)
+  const a = document.createElement("a")
+  a.href = downloadUrl
+  a.download = `critical-${hostname}-${configName.toLowerCase().replace(/\s+/g, "-")}.css`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(downloadUrl)
+
+  showToast(`${configName} CSS from ${hostname} downloaded`)
+}
+
+function handleDownloadAll() {
+  let downloadCount = 0
+
+  state.results.forEach((urlResult) => {
+    if (urlResult.success) {
+      urlResult.configs.forEach((configResult) => {
+        if (configResult.success) {
+          handleDownload(configResult.css, configResult.config.name, urlResult.url)
+          downloadCount++
+        }
+      })
+    }
+  })
+
+  if (downloadCount > 0) {
+    showToast(`Downloaded ${downloadCount} CSS files`)
+  }
+}
+
+function exportBatchResults() {
+  const exportData = {
+    timestamp: new Date().toISOString(),
+    summary: {
+      totalUrls: state.results.length,
+      successfulUrls: state.results.filter((r) => r.success).length,
+      totalConfigs: state.results.reduce((sum, r) => sum + r.configs.length, 0),
+      successfulConfigs: state.results.reduce((sum, r) => sum + r.configs.filter((c) => c.success).length, 0),
+    },
+    results: state.results.map((urlResult) => ({
+      url: urlResult.url,
+      success: urlResult.success,
+      error: urlResult.error,
+      processingTime: urlResult.processingTime,
+      configs: urlResult.configs.map((configResult) => ({
+        name: configResult.config.name,
+        device: configResult.config.device,
+        width: configResult.config.width,
+        height: configResult.config.height,
+        success: configResult.success,
+        error: configResult.error,
+        cssSize: configResult.css.length,
+        css: configResult.css,
+      })),
+    })),
+  }
+
+  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
   const url = URL.createObjectURL(blob)
   const a = document.createElement("a")
   a.href = url
-  a.download = `critical-${configName.toLowerCase().replace(/\s+/g, "-")}.css`
+  a.download = `critical-css-batch-${new Date().toISOString().split("T")[0]}.json`
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
 
-  showToast(`${configName} CSS file downloaded`)
-}
-
-function handleDownloadAll() {
-  const successfulResults = state.results.filter((r) => r.success)
-  if (successfulResults.length === 0) return
-
-  successfulResults.forEach((result) => {
-    handleDownload(result.css, result.config.name)
-  })
+  showToast("Batch results exported as JSON")
 }
 
 // Render functions
+function renderUrlsSection() {
+  return `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between">
+        <label class="text-base font-medium text-gray-900">Website URLs</label>
+        <div class="flex gap-2">
+          <button
+            onclick="loadSampleUrls()"
+            class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            <i class="fas fa-magic mr-1"></i>Load Samples
+          </button>
+          <button
+            onclick="addUrl()"
+            class="px-3 py-1 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+          >
+            <i class="fas fa-plus mr-1"></i>Add URL
+          </button>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        ${state.urls
+          .map(
+            (url, index) => `
+          <div class="flex items-center gap-2">
+            <span class="text-sm text-gray-500 w-8">${index + 1}.</span>
+            <input
+              type="url"
+              placeholder="https://example.com"
+              value="${url}"
+              onchange="updateUrl(${index}, this.value)"
+              class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            ${
+              state.urls.length > 1
+                ? `
+              <button
+                onclick="removeUrl(${index})"
+                class="px-2 py-2 text-red-600 hover:bg-red-50 rounded-md"
+                title="Remove URL"
+              >
+                <i class="fas fa-trash"></i>
+              </button>
+            `
+                : ""
+            }
+          </div>
+        `,
+          )
+          .join("")}
+      </div>
+
+      <div class="text-sm text-gray-600">
+        <i class="fas fa-info-circle mr-1"></i>
+        ${state.urls.filter((url) => url.trim() !== "").length} valid URLs will be processed
+      </div>
+    </div>
+  `
+}
+
 function renderConfigurationCard() {
   const desktopConfigs = Object.entries(presetConfigs).filter(([_, config]) => config.device === "desktop")
   const mobileConfigs = Object.entries(presetConfigs).filter(([_, config]) => config.device === "mobile")
@@ -162,21 +330,11 @@ function renderConfigurationCard() {
   return `
     <div class="bg-white rounded-lg shadow-md p-6 space-y-6">
       <div>
-        <h2 class="text-xl font-bold text-gray-900 mb-2">Configuration</h2>
-        <p class="text-gray-600">Enter a URL and select device configurations to generate critical CSS</p>
+        <h2 class="text-xl font-bold text-gray-900 mb-2">Batch Configuration</h2>
+        <p class="text-gray-600">Configure multiple URLs and device settings for batch critical CSS generation</p>
       </div>
 
-      <div class="space-y-2">
-        <label for="url" class="block text-sm font-medium text-gray-700">Website URL</label>
-        <input
-          id="url"
-          type="url"
-          placeholder="https://example.com"
-          value="${state.url}"
-          onchange="state.url = this.value; render();"
-          class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-        />
-      </div>
+      ${renderUrlsSection()}
 
       <div class="space-y-4">
         <div class="flex items-center justify-between">
@@ -290,24 +448,43 @@ function renderConfigurationCard() {
 
         <div class="text-sm text-gray-600">
           Selected: ${state.selectedConfigs.length} configuration${state.selectedConfigs.length !== 1 ? "s" : ""}
-          ${state.combineDimensions ? " (will generate single combined CSS)" : ""}
+          ${state.combineDimensions ? " (will generate single combined CSS per URL)" : ""}
         </div>
       </div>
 
+      ${
+        state.batchProgress
+          ? `
+        <div class="bg-blue-50 border border-blue-200 rounded-md p-4">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-sm font-medium text-blue-900">Processing URLs...</span>
+            <span class="text-sm text-blue-700">${state.batchProgress.completed}/${state.batchProgress.total}</span>
+          </div>
+          <div class="w-full bg-blue-200 rounded-full h-2">
+            <div 
+              class="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+              style="width: ${(state.batchProgress.completed / state.batchProgress.total) * 100}%"
+            ></div>
+          </div>
+        </div>
+      `
+          : ""
+      }
+
       <button
-        onclick="handleGenerate()"
-        ${state.isLoading || !state.url || state.selectedConfigs.length === 0 ? "disabled" : ""}
+        onclick="handleBatchGenerate()"
+        ${state.isLoading || state.urls.filter((url) => url.trim() !== "").length === 0 || state.selectedConfigs.length === 0 ? "disabled" : ""}
         class="w-full py-3 px-4 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         ${
           state.isLoading
             ? `
           <i class="fas fa-spinner fa-spin mr-2"></i>
-          Generating Critical CSS for ${state.selectedConfigs.length} device${state.selectedConfigs.length !== 1 ? "s" : ""}...
+          Processing ${state.urls.filter((url) => url.trim() !== "").length} URLs...
         `
             : `
-          <i class="fas fa-bolt mr-2"></i>
-          Generate Critical CSS (${state.selectedConfigs.length} device${state.selectedConfigs.length !== 1 ? "s" : ""})
+          <i class="fas fa-rocket mr-2"></i>
+          Generate Critical CSS for ${state.urls.filter((url) => url.trim() !== "").length} URLs
         `
         }
       </button>
@@ -328,94 +505,156 @@ function renderConfigurationCard() {
 function renderResults() {
   if (state.results.length === 0) return ""
 
+  const totalConfigs = state.results.reduce((sum, r) => sum + r.configs.length, 0)
+  const successfulConfigs = state.results.reduce((sum, r) => sum + r.configs.filter((c) => c.success).length, 0)
+
   return `
     <div class="bg-white rounded-lg shadow-md p-6">
       <div class="flex items-center justify-between mb-6">
         <div>
-          <h2 class="text-xl font-bold text-gray-900">Generated Critical CSS</h2>
+          <h2 class="text-xl font-bold text-gray-900">Batch Results</h2>
           <p class="text-gray-600">
-            Critical CSS generated for ${state.results.length} configuration${state.results.length !== 1 ? "s" : ""}
+            Processed ${state.results.length} URLs • Generated ${successfulConfigs}/${totalConfigs} CSS files
           </p>
         </div>
-        <button
-          onclick="handleDownloadAll()"
-          ${!state.results.some((r) => r.success) ? "disabled" : ""}
-          class="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
-        >
-          <i class="fas fa-download mr-2"></i>Download All
-        </button>
+        <div class="flex gap-2">
+          <button
+            onclick="exportBatchResults()"
+            class="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            <i class="fas fa-file-export mr-2"></i>Export JSON
+          </button>
+          <button
+            onclick="handleDownloadAll()"
+            ${successfulConfigs === 0 ? "disabled" : ""}
+            class="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+          >
+            <i class="fas fa-download mr-2"></i>Download All CSS
+          </button>
+        </div>
       </div>
 
-      <div class="space-y-4">
+      <div class="space-y-6">
         ${state.results
           .map(
-            (result, index) => `
+            (urlResult, urlIndex) => `
           <div class="border rounded-lg">
             <div class="p-4 border-b bg-gray-50">
               <div class="flex items-center gap-3">
                 ${
-                  result.success
+                  urlResult.success
                     ? '<i class="fas fa-check-circle text-green-500"></i>'
                     : '<i class="fas fa-times-circle text-red-500"></i>'
                 }
                 <div class="flex-1">
-                  <div class="font-medium">${result.config.name}</div>
+                  <div class="font-medium">${new URL(urlResult.url).hostname}</div>
                   <div class="text-sm text-gray-500">
-                    ${
-                      result.combined
-                        ? `Combined dimensions: ${result.config.dimensions?.map((d) => `${d.width}×${d.height}`).join(", ") || "Multiple"}`
-                        : `${result.config.width} × ${result.config.height}`
-                    }
-                    ${result.success ? ` • ${formatFileSize(result.css.length)}` : " • Failed"}
+                    ${urlResult.url} • ${urlResult.configs.filter((c) => c.success).length}/${urlResult.configs.length} configs successful
+                    ${urlResult.processingTime ? ` • ${formatTime(urlResult.processingTime)}` : ""}
                   </div>
                 </div>
                 <span class="px-2 py-1 text-xs rounded ${
-                  result.config.device === "mobile"
-                    ? "bg-green-100 text-green-800"
-                    : result.config.device === "combined"
-                      ? "bg-purple-100 text-purple-800"
-                      : "bg-blue-100 text-blue-800"
+                  urlResult.success ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"
                 }">
-                  ${result.config.device === "combined" ? "Combined" : result.config.device}
+                  ${urlResult.success ? "Success" : "Failed"}
                 </span>
               </div>
-            </div>
-            
-            <div class="p-4">
               ${
-                result.success
+                urlResult.error
                   ? `
-                <div class="space-y-4">
-                  <div class="flex gap-2">
-                    <button
-                      class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                      data-index="${index}"
-                    >
-                      <i class="fas fa-copy mr-1"></i>Copy
-                    </button>
-                    <button
-                      class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                      data-index="${index}"
-                    >
-                      <i class="fas fa-download mr-1"></i>Download
-                    </button>
-                  </div>
-                  <textarea
-                    readonly
-                    class="w-full h-48 p-3 font-mono text-sm border border-gray-300 rounded-md bg-gray-50"
-                    placeholder="Critical CSS will appear here..."
-                  >${result.css}</textarea>
-                </div>
-              `
-                  : `
-                <div class="p-4 bg-red-50 border border-red-200 rounded-md">
+                <div class="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
                   <p class="text-red-800 text-sm">
-                    <strong>Error:</strong> ${result.error || "Unknown error occurred"}
+                    <strong>Error:</strong> ${urlResult.error}
                   </p>
                 </div>
               `
+                  : ""
               }
             </div>
+            
+            ${
+              urlResult.success
+                ? `
+              <div class="p-4">
+                <div class="space-y-4">
+                  ${urlResult.configs
+                    .map(
+                      (configResult, configIndex) => `
+                    <div class="border rounded-lg">
+                      <div class="p-3 border-b bg-gray-50">
+                        <div class="flex items-center gap-3">
+                          ${
+                            configResult.success
+                              ? '<i class="fas fa-check-circle text-green-500 text-sm"></i>'
+                              : '<i class="fas fa-times-circle text-red-500 text-sm"></i>'
+                          }
+                          <div class="flex-1">
+                            <div class="font-medium text-sm">${configResult.config.name}</div>
+                            <div class="text-xs text-gray-500">
+                              ${
+                                configResult.combined
+                                  ? `Combined dimensions: ${configResult.config.dimensions?.map((d) => `${d.width}×${d.height}`).join(", ") || "Multiple"}`
+                                  : `${configResult.config.width} × ${configResult.config.height}`
+                              }
+                              ${configResult.success ? ` • ${formatFileSize(configResult.css.length)}` : " • Failed"}
+                            </div>
+                          </div>
+                          <span class="px-2 py-1 text-xs rounded ${
+                            configResult.config.device === "mobile"
+                              ? "bg-green-100 text-green-800"
+                              : configResult.config.device === "combined"
+                                ? "bg-purple-100 text-purple-800"
+                                : "bg-blue-100 text-blue-800"
+                          }">
+                            ${configResult.config.device === "combined" ? "Combined" : configResult.config.device}
+                          </span>
+                        </div>
+                      </div>
+                      
+                      <div class="p-3">
+                        ${
+                          configResult.success
+                            ? `
+                          <div class="space-y-3">
+                            <div class="flex gap-2">
+                              <button
+                                class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                                data-index="${urlIndex}"
+                              >
+                                <i class="fas fa-copy mr-1"></i>Copy
+                              </button>
+                              <button
+                                class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                                data-index="${urlIndex}"
+                              >
+                                <i class="fas fa-download mr-1"></i>Download
+                              </button>
+                            </div>
+                            <textarea
+                              readonly
+                              class="w-full h-32 p-2 font-mono text-xs border border-gray-300 rounded-md bg-gray-50"
+                              placeholder="Critical CSS will appear here..."
+                            >${configResult.css}</textarea>
+                          </div>
+                        `
+                            : `
+                          <div class="p-3 bg-red-50 border border-red-200 rounded-md">
+                            <p class="text-red-800 text-xs">
+                              <strong>Error:</strong> ${configResult.error || "Unknown error occurred"}
+                            </p>
+                          </div>
+                        `
+                        }
+                      </div>
+                    </div>
+                  `,
+                    )
+                    .join("")}
+                </div>
+              </div>
+            `
+                : ""
+            }
           </div>
         `,
           )
@@ -423,13 +662,13 @@ function renderResults() {
       </div>
 
       <div class="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
-        <h4 class="font-medium text-blue-900 mb-2">How to use:</h4>
-        <ol class="text-sm text-blue-800 space-y-1 list-decimal list-inside">
-          <li>Copy the generated CSS for each device type</li>
-          <li>Inline the appropriate CSS in your HTML &lt;head&gt; based on device detection</li>
-          <li>Load your full CSS asynchronously or defer it</li>
-          <li>Test your page load performance improvements across devices</li>
-        </ol>
+        <h4 class="font-medium text-blue-900 mb-2">Batch Processing Tips:</h4>
+        <ul class="text-sm text-blue-800 space-y-1 list-disc list-inside">
+          <li>Use combined dimensions mode for better performance when targeting multiple viewports</li>
+          <li>Process similar websites together for consistent results</li>
+          <li>Export results as JSON for further analysis or automation</li>
+          <li>Download all CSS files at once for easy deployment</li>
+        </ul>
       </div>
     </div>
   `
@@ -441,11 +680,11 @@ function render() {
     <div class="max-w-6xl mx-auto p-4 space-y-6">
       <div class="text-center space-y-2">
         <div class="flex items-center justify-center gap-2">
-          <i class="fas fa-bolt text-2xl text-blue-600"></i>
-          <h1 class="text-3xl font-bold text-gray-900">Critical CSS Generator</h1>
+          <i class="fas fa-rocket text-2xl text-blue-600"></i>
+          <h1 class="text-3xl font-bold text-gray-900">Batch Critical CSS Generator</h1>
         </div>
         <p class="text-gray-600">
-          Extract critical above-the-fold CSS for multiple devices to improve page load performance
+          Generate critical CSS for multiple websites simultaneously with maximum agility
         </p>
       </div>
 
@@ -478,12 +717,17 @@ function attachEventListeners() {
 render()
 
 // Make functions globally available
+window.addUrl = addUrl
+window.removeUrl = removeUrl
+window.updateUrl = updateUrl
+window.loadSampleUrls = loadSampleUrls
 window.handleConfigToggle = handleConfigToggle
 window.selectAllDesktop = selectAllDesktop
 window.selectAllMobile = selectAllMobile
-window.handleGenerate = handleGenerate
+window.handleBatchGenerate = handleBatchGenerate
 window.handleCopy = handleCopy
 window.handleDownload = handleDownload
 window.handleDownloadAll = handleDownloadAll
+window.exportBatchResults = exportBatchResults
 window.state = state
 window.render = render
