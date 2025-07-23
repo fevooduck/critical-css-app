@@ -388,14 +388,14 @@ function renderResults() {
                 <div class="space-y-4">
                   <div class="flex gap-2">
                     <button
-                      onclick="handleCopy(\`${result.css.replace(/`/g, "\\`")}\`, '${result.config.name}')"
-                      class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                      class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                      data-index="${index}"
                     >
                       <i class="fas fa-copy mr-1"></i>Copy
                     </button>
                     <button
-                      onclick="handleDownload(\`${result.css.replace(/`/g, "\\`")}\`, '${result.config.name}')"
-                      class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                      class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                      data-index="${index}"
                     >
                       <i class="fas fa-download mr-1"></i>Download
                     </button>
@@ -453,6 +453,25 @@ function render() {
       ${renderResults()}
     </div>
   `
+  attachEventListeners()
+}
+
+function attachEventListeners() {
+  document.querySelectorAll(".copy-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const index = btn.dataset.index;
+      const result = state.results[index];
+      handleCopy(result.css, result.config.name);
+    });
+  });
+
+  document.querySelectorAll(".download-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const index = btn.dataset.index;
+      const result = state.results[index];
+      handleDownload(result.css, result.config.name);
+    });
+  });
 }
 
 // Initialize the app

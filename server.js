@@ -70,7 +70,7 @@ app.post("/api/critical", async (req, res) => {
             height: Math.max(...configs.map((c) => c.height)),
             dimensions: dimensions,
           },
-          css: criticalCSS,
+          css: criticalCSS.css,
           success: true,
           combined: true,
         })
@@ -111,7 +111,7 @@ app.post("/api/critical", async (req, res) => {
 
           results.push({
             config,
-            css: criticalCSS,
+            css: criticalCSS.css,
             success: true,
             combined: false,
           })
