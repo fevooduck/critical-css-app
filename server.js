@@ -4,6 +4,9 @@ import helmet from "helmet"
 import * as critical from "critical"
 import { fileURLToPath } from "url"
 import { dirname, join } from "path"
+import postcss from "postcss"
+import cssnano from "cssnano"
+import combineSelectors from "postcss-combine-duplicated-selectors"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -19,6 +22,24 @@ app.use(express.static("dist"))
 
 // Store active batch jobs
 const batchJobs = new Map()
+
+async function optimizeCSS(css) {
+  const result = await postcss([
+    combineSelectors({
+      removeDuplicatedProperties: true
+    }),
+    cssnano({
+      preset: ['default', {
+        discardDuplicates: true,
+        mergeRules: true,
+        normalizeWhitespace: false
+      }]
+    })
+  ]).process(css);
+
+  return result.css;
+}
+
 
 // Critical CSS generation endpoint for multiple URLs
 app.post("/api/critical/batch", async (req, res) => {
@@ -98,17 +119,36 @@ app.post("/api/critical/batch", async (req, res) => {
 
               console.log(`  🔄 Generating combined critical CSS for ${dimensions.length} dimensions...`)
 
+              const ignoredFiles = [
+                'library-svgs.css',
+                'print.css',
+                'jquery-ui.css',
+                'ln_tint_global.css',
+                'ln_tint_connector_styles',
+                'ln_srh_menuiq',
+                'mmiq-new.css'
+              ];
+
               const criticalCSS = await critical.generate({
                 base: "base/",
                 src: url,
                 dimensions: dimensions,
                 inline: false,
                 extract: false,
+                ignoreInlinedStyles: true,
                 ignore: {
-                  atrule: ["@font-face"],
-                  rule: [/some-regexp/],
-                  decl: (node, value) => /big-image\.png/.test(value),
-                },
+                  atrule: ['@font-face', '@keyframes'],
+                  rule: [/^:root/],
+                  decl: (node, value) => {
+                    const isSvg = /\.svg/.test(value);
+                    const isIgnoredFile = node.source?.input?.file
+                      ? ignoredFiles.some(file => node.source.input.file.includes(file))
+                      : false;
+                    const isAnimation = /animation|transition/.test(node.prop);
+
+                    return isSvg || isIgnoredFile || isAnimation;
+                  }
+                }
               })
 
               urlResults.configs.push({
@@ -216,6 +256,21 @@ app.post("/api/critical/batch", async (req, res) => {
     console.log(`🎉 Batch job ${jobId} completed: ${successfulUrls}/${urls.length} URLs processed successfully`)
     console.log(`📈 Total configurations generated: ${totalConfigs}`)
 
+
+    // Após processar todos os resultados, gere um CSS otimizado
+    const allCSS = results.reduce((combined, urlResult) => {
+      if (!urlResult.success) return combined;
+      const urlCSS = urlResult.configs.reduce((css, configResult) => {
+        if (!configResult.success) return css;
+        return css + `${configResult.css}`;
+      }, '');
+      
+      return combined + urlCSS;
+    }, '');
+
+    // Otimize o CSS combinado
+    const optimizedCSS = await optimizeCSS(allCSS);
+
     res.json({
       jobId,
       results,
@@ -227,6 +282,12 @@ app.post("/api/critical/batch", async (req, res) => {
         combineDimensions,
         processingTime: job?.totalTime || 0,
       },
+      optimizedCSS: {
+        success: true,
+        css: optimizedCSS,
+        size: Buffer.from(optimizedCSS).length,
+        originalSize: Buffer.from(allCSS).length
+      }
     })
   } catch (error) {
     console.error("Batch critical CSS generation error:", error)
