@@ -507,7 +507,7 @@ function renderResults() {
 
   const totalConfigs = state.results.reduce((sum, r) => sum + r.configs.length, 0)
   const successfulConfigs = state.results.reduce((sum, r) => sum + r.configs.filter((c) => c.success).length, 0)
-
+  
   return `
     <div class="bg-white rounded-lg shadow-md p-6">
       <div class="flex items-center justify-between mb-6">
