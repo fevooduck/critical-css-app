@@ -29,8 +29,31 @@ A high-performance Critical CSS generator that processes **multiple websites sim
 
 ## 🛠 Installation & Usage
 
+### Prepare WSL Ubuntu
+\`\`\`bash
+sudo apt update\
+sudo apt install -y \\
+  libnss3 \\
+  libatk-bridge2.0-0 \\
+  libxcomposite1 \\
+  libxrandr2 \\
+  libxdamage1 \\
+  libxss1 \\
+  libpangocairo-1.0-0 \\
+  libgtk-3-0 \\
+  libgbm-dev \\
+  libxshmfence-dev \\
+  libx11-xcb1 \\
+  libglu1-mesa \\
+  libasound2t64 \\
+  fonts-liberation \\
+  xdg-utils \\
+  wget\
+\`\`\`
+
 ### Quick Start
 \`\`\`bash
+nvm use 20
 npm install
 npm run dev
 \`\`\`
