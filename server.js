@@ -138,7 +138,7 @@ app.post("/api/critical/batch", async (req, res) => {
                 ignoreInlinedStyles: true,
                 ignore: {
                   atrule: ['@font-face', '@keyframes'],
-                  rule: [/^:root/],
+                  // rule: [/^:root/],
                   decl: (node, value) => {
                     const isSvg = /\.svg/.test(value);
                     const isIgnoredFile = node.source?.input?.file
@@ -285,6 +285,8 @@ app.post("/api/critical/batch", async (req, res) => {
       optimizedCSS: {
         success: true,
         css: optimizedCSS,
+        totalUrls: urls.length,
+        url: urls[0],
         size: Buffer.from(optimizedCSS).length,
         originalSize: Buffer.from(allCSS).length
       }

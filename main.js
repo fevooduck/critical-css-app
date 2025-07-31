@@ -52,13 +52,13 @@ const presetConfigs = {
 
 // State management
 const state = {
-	urls: ["https://example.com", "https://github.com"],
-	selectedConfigs: ["desktop-1920", "mobile-375"],
+	urls: ["https://www.receitasnestle.com.br"],
+	selectedConfigs: ["desktop-1366", "mobile-360"],
 	results: [],
   optimizedCSS: [],
 	isLoading: false,
 	error: "",
-	combineDimensions: false,
+	combineDimensions: true,
 	batchProgress: null,
 	currentJobId: null,
 };
@@ -254,6 +254,7 @@ async function handleCopy(css, configName, url) {
 			`${configName} CSS from ${new URL(url).hostname} copied to clipboard`,
 		);
 	} catch (err) {
+		console.error("Failed to copy to clipboard:", url);
 		showToast("Failed to copy to clipboard", "error");
 	}
 }
@@ -769,13 +770,13 @@ function renderResults() {
                             <div class="flex gap-2">
                               <button
                                 class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                                data-index="${urlIndex}"
+                                data-index="${configIndex}"
                               >
                                 <i class="fas fa-copy mr-1"></i>Copy
                               </button>
                               <button
                                 class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                                data-index="${urlIndex}"
+                                data-index="${configIndex}"
                               >
                                 <i class="fas fa-download mr-1"></i>Download
                               </button>
@@ -839,7 +840,7 @@ function renderResults() {
             <div class="space-y-3">
               <div class="flex gap-2">
                 <button
-                  class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                  class="copy-btn-optimized px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
                 >
                   <i class="fas fa-copy mr-1"></i>Copy
                 </button>
@@ -901,16 +902,23 @@ function attachEventListeners() {
 	document.querySelectorAll(".copy-btn").forEach((btn) => {
 		btn.addEventListener("click", () => {
 			const index = btn.dataset.index;
-			const result = state.results[index];
-			handleCopy(result.css, result.config.name);
+			const result = state.results[index].configs[0];
+			handleCopy(result.css, result.config.name, state.results[index].url);
+		});
+	});
+	document.querySelectorAll(".copy-btn-optimized").forEach((btn) => {
+		btn.addEventListener("click", () => {
+			const result = state.optimizedCSS;
+			const urlsLength = `Total de Urls: ${result.totalUrls}`;
+			handleCopy(result.css, urlsLength, result.url);
 		});
 	});
 
 	document.querySelectorAll(".download-btn").forEach((btn) => {
 		btn.addEventListener("click", () => {
 			const index = btn.dataset.index;
-			const result = state.results[index];
-			handleDownload(result.css, result.config.name);
+			const result = state.results[index].configs[0];
+			handleDownload(result.css, result.config.name, state.results[index].url);
 		});
 	});
 }
