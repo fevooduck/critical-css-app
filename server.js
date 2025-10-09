@@ -148,7 +148,14 @@ app.post("/api/critical/batch", async (req, res) => {
 
                     return isSvg || isIgnoredFile || isAnimation;
                   }
-                }
+                },
+                userAgent: "Mozilla/5.0 (compatible; CriticalBot/1.0; +https://github.com/addyosmani/critical)",
+                penthouse: {
+                  blockJSRequests: true,   // 🚫 bloqueia JS externo (CSP, cookies, trackers)
+                  timeout: 120000,         // aumenta o tempo limite (2min)
+                  strict: false,           // evita erros fatais por regras CSS inválidas
+                  renderWaitTime: 500,     // espera um pouco mais antes de tirar o "snapshot"
+                },
               })
 
               urlResults.configs.push({
