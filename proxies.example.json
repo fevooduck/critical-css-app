@@ -1,0 +1,3 @@
+{
+  "www.example.com": "http://user:password@proxy-host:8080"
+}
