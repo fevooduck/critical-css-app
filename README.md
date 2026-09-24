@@ -119,9 +119,26 @@ POST /api/critical/batch
 GET /api/critical/batch/:jobId
 \`\`\`
 
+### Retry Failed URLs
+\`\`\`
+POST /api/critical/batch/:jobId/retry
+\`\`\`
+
 ### Single URL (Backward Compatibility)
 \`\`\`
 POST /api/critical
+\`\`\`
+
+### Manual Capture (fallback for blocked domains)
+\`\`\`
+POST   /api/capture   { url, html }
+GET    /api/capture
+DELETE /api/capture   { url }
+\`\`\`
+
+### Domain Block History
+\`\`\`
+GET /api/domain-info?url=...
 \`\`\`
 
 ## 📋 Sample Batch Configuration
@@ -138,7 +155,40 @@ Perfect for testing and demonstration purposes.
 ## 🎛 Advanced Features
 
 - **Job Tracking**: Monitor batch progress with unique job IDs
+- **Job Persistence**: Batch job history survives a server restart (`data/jobs.json`)
 - **Automatic Cleanup**: Old batch jobs cleaned up hourly
 - **Health Monitoring**: Server health endpoint with active job count
 - **Flexible Timeouts**: Configurable timeouts per URL
 - **Ignore Patterns**: Custom CSS ignore rules for optimization
+
+## 🛡 Anti-Bot / WAF Resilience
+
+Every URL is visited with a real, current Chromium (via Puppeteer) with basic
+stealth patches, instead of a bot-identifying UA/old browser. Each visit is
+checked for known WAF/challenge signals (Akamai, Cloudflare, Incapsula) before
+any CSS is generated, so a blocked page never silently produces garbage CSS.
+
+If direct access fails, the app falls back automatically, per URL:
+
+1. **Direct** — the shared stealth browser (default, works for most sites)
+2. **Proxy** — a domain-specific proxy, if configured in `proxies.json`
+   (copy `proxies.example.json`; never committed, it can hold credentials)
+3. **Manual capture** — HTML captured from your own real browser via the
+   bookmarklet in the UI's "Captura manual" section, for domains that block
+   every automated path (drag it to your bookmarks bar, open the blocked URL
+   normally, click it)
+
+The outcome of each visit is remembered per hostname (`data/domain-strategy.json`)
+so the UI can eventually warn about domains that keep blocking direct access.
+Requests to the same hostname are always serialized (never in parallel), since
+hitting a protected domain concurrently is itself a common trigger for
+rate-based bot rules.
+
+Each result also includes the full (non-critical) CSS the page actually used —
+not cssnano-optimized, since that pipeline can take minutes on the several MB
+of CSS a CSS-in-JS-heavy SPA can produce — as a quick reference/audit export
+alongside the critical CSS.
+
+Failed URLs in a completed batch can be reprocessed on their own via
+`POST /api/critical/batch/:jobId/retry`, without re-running the URLs that
+already succeeded.

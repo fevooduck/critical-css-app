@@ -7,6 +7,29 @@ import { dirname, join } from 'path';
 import postcss from 'postcss';
 import cssnano from 'cssnano';
 import combineSelectors from 'postcss-combine-duplicated-selectors';
+import {
+  getSharedBrowser,
+  getRealUserAgent,
+  closeSharedBrowser,
+} from './lib/browser-manager.js';
+import { resolvePage } from './lib/page-resolver.js';
+import { runExclusive } from './lib/hostname-lock.js';
+import * as jobStore from './lib/job-store.js';
+import {
+  saveCapture,
+  getCapture,
+  deleteCapture,
+  listCaptures,
+} from './lib/manual-capture.js';
+import { getDomainInfo } from './lib/domain-strategy.js';
+
+function hostnameOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -20,8 +43,10 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('dist'));
 
-// Store active batch jobs
+// Store active batch jobs (mirrored to disk via jobStore so history and
+// in-flight progress survive a server restart)
 const batchJobs = new Map();
+await jobStore.loadInto(batchJobs);
 
 async function optimizeCSS(css) {
   const result = await postcss([
@@ -87,7 +112,10 @@ app.post('/api/critical/batch', async (req, res) => {
       results: [],
       status: 'processing',
       startTime: new Date(),
+      configs,
+      combineDimensions,
     });
+    await jobStore.persist(batchJobs);
 
     // Process URLs in parallel with controlled concurrency
     const concurrencyLimit = 3; // Process 3 URLs simultaneously
@@ -111,12 +139,59 @@ app.post('/api/critical/batch', async (req, res) => {
           configs: [],
           success: true,
           error: null,
+          blocked: false,
+          strategy: null,
           processingTime: 0,
         };
 
         const urlStartTime = Date.now();
+        const hostname = hostnameOf(url);
 
         try {
+          console.log(`  🛡️  Visiting ${url} with real browser (block check + snapshot)...`);
+          // Serialized per hostname: never hit the same WAF-protected domain
+          // with two visits at once, even if other URLs in this batch do.
+          const {
+            blockResult,
+            html: renderedHtml,
+            css: rawCss,
+            strategy,
+          } = await runExclusive(hostname, () => resolvePage(url));
+
+          urlResults.strategy = strategy;
+
+          if (blockResult.blocked) {
+            console.warn(`  🚫 Blocked before generating CSS: ${blockResult.reason}`);
+            urlResults.success = false;
+            urlResults.blocked = true;
+            urlResults.error = blockResult.reason;
+            urlResults.blockDetails = blockResult;
+            urlResults.processingTime = Date.now() - urlStartTime;
+
+            const blockedJob = batchJobs.get(jobId);
+            if (blockedJob) {
+              blockedJob.completed++;
+              blockedJob.results.push(urlResults);
+              await jobStore.persist(batchJobs);
+            }
+
+            return urlResults;
+          }
+
+          if (strategy !== 'manual-capture' && rawCss) {
+            // Deliberately NOT running this through the cssnano pipeline used
+            // for the critical CSS below: modern CSS-in-JS sites (e.g. GitHub)
+            // can produce several MB of raw CSS, and cssnano's default preset
+            // (mergeRules/discardDuplicates) can take minutes on input that
+            // size — a bad trade for what's meant to be a quick reference
+            // export, not a production-optimized bundle.
+            urlResults.fullCss = {
+              css: rawCss,
+              size: Buffer.from(rawCss).length,
+              originalSize: Buffer.from(rawCss).length,
+            };
+          }
+
           if (combineDimensions && configs.length > 1) {
             // Generate single CSS for multiple dimensions
             try {
@@ -141,11 +216,17 @@ app.post('/api/critical/batch', async (req, res) => {
 
               const criticalCSS = await critical.generate({
                 base: 'base/',
-                src: url,
+                html: renderedHtml,
                 dimensions: dimensions,
                 inline: false,
                 extract: false,
-                ignoreInlinedStyles: true,
+                ignoreInlinedStyles: false,
+                // We've already resolved every asset URL via the real browser
+                // render, so skip critical's own asset-rebasing pass (it's
+                // pointless here and, for CSS-in-JS-heavy pages, logs a
+                // "Not rebasing assets" warning containing the *entire* CSS
+                // text per inline stylesheet).
+                rebase: false,
                 ignore: {
                   atrule: ['@font-face', '@keyframes'],
                   rule: [/modal/, /tint/],
@@ -161,11 +242,11 @@ app.post('/api/critical/batch', async (req, res) => {
                     return isSvg || isIgnoredFile || isAnimation;
                   },
                 },
-                userAgent:
-                  'Mozilla/5.0 (compatible; CriticalBot/1.0; +https://github.com/addyosmani/critical)',
                 penthouse: {
+                  getBrowser: getSharedBrowser,
+                  userAgent: await getRealUserAgent(),
                   blockJSRequests: true, // 🚫 bloqueia JS externo (CSP, cookies, trackers)
-                  timeout: 120000, // aumenta o tempo limite (2min)
+                  timeout: 180000, // aumenta o tempo limite (3min) — páginas com muito CSS (ex: SPAs com CSS-in-JS) demoram mais
                   strict: false, // evita erros fatais por regras CSS inválidas
                   renderWaitTime: 500, // espera um pouco mais antes de tirar o "snapshot"
                 },
@@ -213,21 +294,31 @@ app.post('/api/critical/batch', async (req, res) => {
 
                 const criticalCSS = await critical.generate({
                   base: 'base/',
-                  src: url,
+                  html: renderedHtml,
                   width: config.width,
                   height: config.height,
                   inline: false,
                   extract: false,
+                  ignoreInlinedStyles: false,
+                  rebase: false,
                   ignore: {
                     atrule: ['@font-face'],
                     rule: [/some-regexp/],
                     decl: (node, value) => /big-image\.png/.test(value),
                   },
+                  penthouse: {
+                    getBrowser: getSharedBrowser,
+                    userAgent: await getRealUserAgent(),
+                    blockJSRequests: true,
+                    timeout: 180000,
+                    strict: false,
+                    renderWaitTime: 500,
+                  },
                 });
 
                 urlResults.configs.push({
                   config,
-                  css: criticalCSS,
+                  css: criticalCSS.css,
                   success: true,
                   combined: false,
                 });
@@ -263,6 +354,7 @@ app.post('/api/critical/batch', async (req, res) => {
         if (job) {
           job.completed++;
           job.results.push(urlResults);
+          await jobStore.persist(batchJobs);
 
           console.log(
             `📊 Progress: ${job.completed}/${job.totalUrls} URLs completed`,
@@ -281,7 +373,8 @@ app.post('/api/critical/batch', async (req, res) => {
     if (job) {
       job.status = 'completed';
       job.endTime = new Date();
-      job.totalTime = job.endTime - job.startTime;
+      job.totalTime = job.endTime - new Date(job.startTime);
+      await jobStore.persist(batchJobs);
     }
 
     const successfulUrls = results.filter((r) => r.success).length;
@@ -363,6 +456,78 @@ app.get('/api/critical/batch/:jobId', (req, res) => {
   });
 });
 
+// Reprocess only the URLs that failed in a previous batch job
+app.post('/api/critical/batch/:jobId/retry', async (req, res) => {
+  const { jobId } = req.params;
+  const originalJob = batchJobs.get(jobId);
+
+  if (!originalJob) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  const failedUrls = (originalJob.results || [])
+    .filter((result) => !result.success)
+    .map((result) => result.url);
+
+  if (failedUrls.length === 0) {
+    return res.status(400).json({ error: 'No failed URLs to retry in this job' });
+  }
+
+  req.body = {
+    urls: failedUrls,
+    configs: originalJob.configs,
+    combineDimensions: originalJob.combineDimensions,
+  };
+
+  return app._router.handle(
+    { ...req, url: '/api/critical/batch', method: 'POST' },
+    res,
+  );
+});
+
+// Manual capture: a bookmarklet run from the user's own real browser posts
+// the rendered page here so a domain that blocks every automated path can
+// still be processed (used as the last fallback tier in resolvePage()).
+app.post('/api/capture', async (req, res) => {
+  const { url, html } = req.body;
+
+  if (!url || !html) {
+    return res.status(400).json({ error: 'url and html are required' });
+  }
+
+  try {
+    new URL(url);
+  } catch {
+    return res.status(400).json({ error: 'Invalid URL format' });
+  }
+
+  await saveCapture(url, html);
+  res.json({ success: true });
+});
+
+app.get('/api/capture', async (req, res) => {
+  res.json({ captures: await listCaptures() });
+});
+
+app.delete('/api/capture', async (req, res) => {
+  const { url } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: 'url is required' });
+  }
+  await deleteCapture(url);
+  res.json({ success: true });
+});
+
+// Per-domain block history, so the UI can warn upfront about domains that
+// have been blocking direct access
+app.get('/api/domain-info', async (req, res) => {
+  const { url } = req.query;
+  if (!url) {
+    return res.status(400).json({ error: 'url query param is required' });
+  }
+  res.json({ domain: await getDomainInfo(url) });
+});
+
 // Single URL endpoint (backward compatibility)
 app.post('/api/critical', async (req, res) => {
   const { url, configs, combineDimensions } = req.body;
@@ -392,14 +557,19 @@ app.get('/api/health', (req, res) => {
 });
 
 // Cleanup old batch jobs (run every hour)
-setInterval(() => {
+setInterval(async () => {
   const oneHourAgo = Date.now() - 60 * 60 * 1000;
+  let removed = false;
   for (const [jobId, job] of batchJobs.entries()) {
-    if (job.startTime.getTime() < oneHourAgo) {
+    // startTime is a Date for jobs created this run, but an ISO string for
+    // jobs restored from disk at startup — new Date(...) handles both.
+    if (new Date(job.startTime).getTime() < oneHourAgo) {
       batchJobs.delete(jobId);
+      removed = true;
       console.log(`🧹 Cleaned up old batch job: ${jobId}`);
     }
   }
+  if (removed) await jobStore.persist(batchJobs);
 }, 60 * 60 * 1000);
 
 // Serve the frontend
@@ -416,3 +586,12 @@ app.listen(PORT, () => {
   );
   console.log(`🔍 Single API endpoint: http://localhost:${PORT}/api/critical`);
 });
+
+async function shutdown(signal) {
+  console.log(`\n${signal} received, closing shared browser...`);
+  await closeSharedBrowser();
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

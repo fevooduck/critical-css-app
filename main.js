@@ -1,59 +1,24 @@
-// Configuration presets
+// Configuration presets — standardized on first-fold desktop + mobile only,
+// so critical CSS output stays consistent and predictably sized across
+// projects (more combined viewports means a larger unioned critical CSS).
 const presetConfigs = {
-	"desktop-1920": {
-		width: 1920,
-		height: 1080,
-		device: "desktop",
-		name: "Desktop 1920×1080",
-	},
 	"desktop-1366": {
 		width: 1366,
 		height: 768,
 		device: "desktop",
 		name: "Desktop 1366×768",
 	},
-	"desktop-1280": {
-		width: 1280,
-		height: 720,
-		device: "desktop",
-		name: "Desktop 1280×720",
-	},
 	"mobile-375": {
 		width: 375,
 		height: 667,
 		device: "mobile",
-		name: "iPhone SE",
-	},
-	"mobile-414": {
-		width: 414,
-		height: 896,
-		device: "mobile",
-		name: "iPhone 11 Pro Max",
-	},
-	"mobile-360": {
-		width: 360,
-		height: 640,
-		device: "mobile",
-		name: "Android Small",
-	},
-	"tablet-768": {
-		width: 768,
-		height: 1024,
-		device: "desktop",
-		name: "iPad Portrait",
-	},
-	"tablet-1024": {
-		width: 1024,
-		height: 768,
-		device: "desktop",
-		name: "iPad Landscape",
+		name: "iPhone SE (375×667)",
 	},
 };
 
 // State management
 const state = {
 	urls: ["https://www.receitasnestle.com.br"],
-	selectedConfigs: ["desktop-1366", "mobile-360"],
 	results: [],
   optimizedCSS: [],
 	isLoading: false,
@@ -61,6 +26,8 @@ const state = {
 	combineDimensions: true,
 	batchProgress: null,
 	currentJobId: null,
+	lastJobId: null,
+	captures: [],
 };
 
 // Utility functions
@@ -134,54 +101,12 @@ function loadSampleUrls() {
 	render();
 }
 
-// Configuration management
-function handleConfigToggle(configKey) {
-	if (state.selectedConfigs.includes(configKey)) {
-		state.selectedConfigs = state.selectedConfigs.filter(
-			(key) => key !== configKey,
-		);
-	} else {
-		state.selectedConfigs = [...state.selectedConfigs, configKey];
-	}
-	render();
-}
-
-function selectAllDesktop() {
-	const desktopConfigs = Object.entries(presetConfigs)
-		.filter(([_, config]) => config.device === "desktop")
-		.map(([key]) => key);
-
-	const withoutDesktop = state.selectedConfigs.filter(
-		(key) => presetConfigs[key]?.device !== "desktop",
-	);
-	state.selectedConfigs = [...withoutDesktop, ...desktopConfigs];
-	render();
-}
-
-function selectAllMobile() {
-	const mobileConfigs = Object.entries(presetConfigs)
-		.filter(([_, config]) => config.device === "mobile")
-		.map(([key]) => key);
-
-	const withoutMobile = state.selectedConfigs.filter(
-		(key) => presetConfigs[key]?.device !== "mobile",
-	);
-	state.selectedConfigs = [...withoutMobile, ...mobileConfigs];
-	render();
-}
-
 // Batch processing
 async function handleBatchGenerate() {
 	const validUrls = state.urls.filter((url) => url.trim() !== "");
 
 	if (validUrls.length === 0) {
 		state.error = "Please enter at least one valid URL";
-		render();
-		return;
-	}
-
-	if (state.selectedConfigs.length === 0) {
-		state.error = "Please select at least one device configuration";
 		render();
 		return;
 	}
@@ -194,7 +119,8 @@ async function handleBatchGenerate() {
 	render();
 
 	try {
-		const configs = state.selectedConfigs.map((key) => presetConfigs[key]);
+		// Fixed, standardized viewports (see presetConfigs) — not user-selectable
+		const configs = Object.values(presetConfigs);
 		const jobId = `batch_${Date.now()}_${Math.random()
 			.toString(36)
 			.substr(2, 9)}`;
@@ -227,6 +153,7 @@ async function handleBatchGenerate() {
 		state.results = data.results;
     state.optimizedCSS = data.optimizedCSS || [];
 		state.batchProgress = null;
+		state.lastJobId = data.jobId;
 
 		const { summary } = data;
 		showToast(
@@ -248,8 +175,9 @@ async function handleBatchGenerate() {
 
 // Export functions
 async function handleCopy(css, configName, url) {
+	const wrapped = `<style>\n${css}\n</style>`;
 	try {
-		await navigator.clipboard.writeText(css);
+		await navigator.clipboard.writeText(wrapped);
 		showToast(
 			`${configName} CSS from ${new URL(url).hostname} copied to clipboard`,
 		);
@@ -346,6 +274,96 @@ function exportBatchResults() {
 	showToast("Batch results exported as JSON");
 }
 
+// Retry only the URLs that failed in the last batch job
+async function handleRetryFailed() {
+	if (!state.lastJobId) return;
+
+	state.isLoading = true;
+	render();
+
+	try {
+		const response = await fetch(
+			`/api/critical/batch/${state.lastJobId}/retry`,
+			{ method: "POST" },
+		);
+		const data = await response.json();
+
+		if (!response.ok) {
+			throw new Error(data.error || "Failed to retry");
+		}
+
+		const retriedByUrl = new Map(data.results.map((r) => [r.url, r]));
+		state.results = state.results.map((r) => retriedByUrl.get(r.url) || r);
+		state.lastJobId = data.jobId;
+
+		showToast(
+			`Retry: ${data.summary.successfulUrls}/${data.summary.totalUrls} succeeded. (O CSS otimizado combinado acima ainda é o da execução original.)`,
+		);
+	} catch (err) {
+		showToast(err.message, "error");
+	} finally {
+		state.isLoading = false;
+		render();
+	}
+}
+
+// Manual capture (fallback for domains that block every automated path)
+function buildBookmarklet() {
+	const apiOrigin = `${location.protocol}//${location.hostname}:9001`;
+	const code = `
+    (function(){
+      try {
+        var css=[];
+        for (var i=0;i<document.styleSheets.length;i++){
+          try{
+            var rules=document.styleSheets[i].cssRules;
+            var t='';
+            for (var j=0;j<rules.length;j++) t+=rules[j].cssText;
+            css.push(t);
+          }catch(e){}
+        }
+        var clone=document.documentElement.cloneNode(true);
+        var junk=clone.querySelectorAll('link[rel=stylesheet], style, script');
+        junk.forEach(function(el){el.remove();});
+        var styleTag=document.createElement('style');
+        styleTag.textContent=css.join('\\n');
+        var head=clone.querySelector('head');
+        if (head) head.insertBefore(styleTag, head.firstChild);
+        var html='<html>'+clone.innerHTML+'</html>';
+        fetch('${apiOrigin}/api/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,html:html})})
+          .then(function(){alert('Pagina capturada! Volte ao Critical CSS Generator para reprocessar esta URL.');})
+          .catch(function(e){alert('Falha ao enviar captura: '+e.message);});
+      } catch(e) { alert('Erro ao capturar: '+e.message); }
+    })();
+  `;
+	return "javascript:" + encodeURIComponent(code.replace(/\s+/g, " ").trim());
+}
+
+async function loadCaptures() {
+	try {
+		const res = await fetch("/api/capture");
+		const data = await res.json();
+		state.captures = data.captures || [];
+		render();
+	} catch (err) {
+		console.error("Failed to load captures", err);
+	}
+}
+
+async function handleDeleteCapture(url) {
+	try {
+		await fetch("/api/capture", {
+			method: "DELETE",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ url }),
+		});
+		await loadCaptures();
+		showToast("Captura removida");
+	} catch (err) {
+		showToast("Falha ao remover captura", "error");
+	}
+}
+
 // Render functions
 function renderUrlsSection() {
 	return `
@@ -411,18 +429,11 @@ function renderUrlsSection() {
 }
 
 function renderConfigurationCard() {
-	const desktopConfigs = Object.entries(presetConfigs).filter(
-		([_, config]) => config.device === "desktop",
-	);
-	const mobileConfigs = Object.entries(presetConfigs).filter(
-		([_, config]) => config.device === "mobile",
-	);
-
 	return `
     <div class="bg-white rounded-lg shadow-md p-6 space-y-6">
       <div>
         <h2 class="text-xl font-bold text-gray-900 mb-2">Batch Configuration</h2>
-        <p class="text-gray-600">Configure multiple URLs and device settings for batch critical CSS generation</p>
+        <p class="text-gray-600">Configure as URLs para gerar o CSS crítico da primeira dobra (desktop + mobile) em lote</p>
       </div>
 
       ${renderUrlsSection()}
@@ -458,98 +469,27 @@ function renderConfigurationCard() {
         </div>
       </div>
 
-      <div class="space-y-4">
-        <div class="flex items-center justify-between">
-          <label class="text-base font-medium text-gray-900">Device Configurations</label>
-          <div class="flex gap-2">
-            <button
-              onclick="selectAllDesktop()"
-              class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-            >
-              <i class="fas fa-desktop mr-1"></i>All Desktop
-            </button>
-            <button
-              onclick="selectAllMobile()"
-              class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-            >
-              <i class="fas fa-mobile-alt mr-1"></i>All Mobile
-            </button>
-          </div>
+      <div class="space-y-3">
+        <label class="text-base font-medium text-gray-900">Device Configurations</label>
+        <div class="flex flex-wrap gap-3">
+          ${Object.values(presetConfigs)
+						.map(
+							(config) => `
+            <div class="flex items-center gap-2 px-3 py-2 border rounded-lg bg-gray-50">
+              <i class="fas ${
+								config.device === "mobile" ? "fa-mobile-alt text-green-600" : "fa-desktop text-blue-600"
+							}"></i>
+              <div>
+                <div class="font-medium text-sm">${config.name}</div>
+                <div class="text-xs text-gray-500">${config.width} × ${config.height}</div>
+              </div>
+            </div>
+          `,
+						)
+						.join("")}
         </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div class="space-y-3">
-            <div class="flex items-center gap-2">
-              <i class="fas fa-desktop text-blue-600"></i>
-              <h3 class="font-medium">Desktop & Tablet</h3>
-            </div>
-            <div class="space-y-2">
-              ${desktopConfigs
-								.map(
-									([key, config]) => `
-                <div class="flex items-center space-x-3 p-3 border rounded-lg hover:bg-gray-50">
-                  <input
-                    type="checkbox"
-                    id="${key}"
-                    ${state.selectedConfigs.includes(key) ? "checked" : ""}
-                    onchange="handleConfigToggle('${key}')"
-                    class="rounded"
-                  />
-                  <label for="${key}" class="flex-1 cursor-pointer">
-                    <div class="font-medium">${config.name}</div>
-                    <div class="text-sm text-gray-500">${config.width} × ${
-										config.height
-									}</div>
-                  </label>
-                  <span class="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded">Desktop</span>
-                </div>
-              `,
-								)
-								.join("")}
-            </div>
-          </div>
-
-          <div class="space-y-3">
-            <div class="flex items-center gap-2">
-              <i class="fas fa-mobile-alt text-green-600"></i>
-              <h3 class="font-medium">Mobile</h3>
-            </div>
-            <div class="space-y-2">
-              ${mobileConfigs
-								.map(
-									([key, config]) => `
-                <div class="flex items-center space-x-3 p-3 border rounded-lg hover:bg-gray-50">
-                  <input
-                    type="checkbox"
-                    id="${key}"
-                    ${state.selectedConfigs.includes(key) ? "checked" : ""}
-                    onchange="handleConfigToggle('${key}')"
-                    class="rounded"
-                  />
-                  <label for="${key}" class="flex-1 cursor-pointer">
-                    <div class="font-medium">${config.name}</div>
-                    <div class="text-sm text-gray-500">${config.width} × ${
-										config.height
-									}</div>
-                  </label>
-                  <span class="px-2 py-1 text-xs bg-green-100 text-green-800 rounded">Mobile</span>
-                </div>
-              `,
-								)
-								.join("")}
-            </div>
-          </div>
-        </div>
-
         <div class="text-sm text-gray-600">
-          Selected: ${state.selectedConfigs.length} configuration${
-		state.selectedConfigs.length !== 1 ? "s" : ""
-	}
-          ${
-						state.combineDimensions
-							? " (will generate single combined CSS per URL)"
-							: ""
-					}
+          Padronizado para primeira dobra (desktop + mobile) em todas as URLs — não configurável.
         </div>
       </div>
 
@@ -581,8 +521,7 @@ function renderConfigurationCard() {
         onclick="handleBatchGenerate()"
         ${
 					state.isLoading ||
-					state.urls.filter((url) => url.trim() !== "").length === 0 ||
-					state.selectedConfigs.length === 0
+					state.urls.filter((url) => url.trim() !== "").length === 0
 						? "disabled"
 						: ""
 				}
@@ -618,6 +557,53 @@ function renderConfigurationCard() {
   `;
 }
 
+function renderManualCaptureSection() {
+	const bookmarkletHref = buildBookmarklet();
+
+	return `
+    <div class="bg-white rounded-lg shadow-md p-6 space-y-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-900 mb-2">Captura manual (URLs bloqueadas)</h2>
+        <p class="text-gray-600 text-sm">
+          Para domínios que bloqueiam até o navegador automatizado, arraste o botão abaixo para a barra de
+          favoritos, abra a URL bloqueada no seu navegador normal (sessão real, já logado) e clique nele.
+          A página capturada passa a ser usada automaticamente como alternativa ao gerar CSS para essa mesma URL.
+        </p>
+      </div>
+      <a
+        href="${bookmarkletHref}"
+        onclick="return false;"
+        class="inline-block px-4 py-2 bg-gray-800 text-white rounded-md text-sm cursor-move"
+        title="Arraste para a barra de favoritos"
+      >
+        <i class="fas fa-bookmark mr-2"></i>Capturar página (arraste-me para os favoritos)
+      </a>
+      ${
+				state.captures.length > 0
+					? `
+        <div class="mt-4 space-y-2">
+          <div class="text-sm font-medium text-gray-900">Páginas capturadas (${state.captures.length})</div>
+          ${state.captures
+						.map(
+							(capture) => `
+            <div class="flex items-center justify-between p-2 border rounded-md text-sm">
+              <span class="truncate flex-1 mr-2" title="${capture.url}">${capture.url}</span>
+              <span class="text-gray-500 mr-2 whitespace-nowrap">${formatFileSize(capture.size)}</span>
+              <button class="delete-capture-btn text-red-600 hover:bg-red-50 px-2 py-1 rounded" data-url="${capture.url}">
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>
+          `,
+						)
+						.join("")}
+        </div>
+      `
+					: ""
+			}
+    </div>
+  `;
+}
+
 function renderResults() {
 	if (state.results.length === 0) return "";
 
@@ -643,6 +629,19 @@ function renderResults() {
           </p>
         </div>
         <div class="flex gap-2">
+          ${
+						state.results.some((r) => !r.success) && state.lastJobId
+							? `
+            <button
+              onclick="handleRetryFailed()"
+              ${state.isLoading ? "disabled" : ""}
+              class="px-4 py-2 border border-yellow-300 text-yellow-800 bg-yellow-50 rounded-md hover:bg-yellow-100 disabled:opacity-50"
+            >
+              <i class="fas fa-redo mr-2"></i>Reprocessar falhas
+            </button>
+          `
+							: ""
+					}
           <button
             onclick="exportBatchResults()"
             class="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
@@ -669,6 +668,8 @@ function renderResults() {
                 ${
 									urlResult.success
 										? '<i class="fas fa-check-circle text-green-500"></i>'
+										: urlResult.blocked
+										? '<i class="fas fa-shield-alt text-yellow-600"></i>'
 										: '<i class="fas fa-times-circle text-red-500"></i>'
 								}
                 <div class="flex-1">
@@ -686,20 +687,51 @@ function renderResults() {
 										}
                   </div>
                 </div>
+                ${
+									urlResult.strategy && urlResult.strategy !== "direct"
+										? `
+                  <span class="px-2 py-1 text-xs rounded bg-indigo-100 text-indigo-800" title="Este resultado não veio de uma visita direta">
+                    ${
+											urlResult.strategy === "proxy"
+												? "via proxy"
+												: "via captura manual"
+										}
+                  </span>
+                `
+										: ""
+								}
                 <span class="px-2 py-1 text-xs rounded ${
 									urlResult.success
 										? "bg-green-100 text-green-800"
+										: urlResult.blocked
+										? "bg-yellow-100 text-yellow-800"
 										: "bg-red-100 text-red-800"
 								}">
-                  ${urlResult.success ? "Success" : "Failed"}
+                  ${
+										urlResult.success
+											? "Success"
+											: urlResult.blocked
+											? "Blocked"
+											: "Failed"
+									}
                 </span>
               </div>
               ${
 								urlResult.error
 									? `
-                <div class="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
-                  <p class="text-red-800 text-sm">
-                    <strong>Error:</strong> ${urlResult.error}
+                <div class="mt-3 p-3 ${
+									urlResult.blocked
+										? "bg-yellow-50 border border-yellow-200"
+										: "bg-red-50 border border-red-200"
+								} rounded-md">
+                  <p class="${
+										urlResult.blocked ? "text-yellow-800" : "text-red-800"
+									} text-sm">
+                    <strong>${
+											urlResult.blocked
+												? "Bloqueado por proteção anti-bot:"
+												: "Error:"
+										}</strong> ${urlResult.error}
                   </p>
                 </div>
               `
@@ -770,13 +802,15 @@ function renderResults() {
                             <div class="flex gap-2">
                               <button
                                 class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                                data-index="${configIndex}"
+                                data-url-index="${urlIndex}"
+                                data-config-index="${configIndex}"
                               >
                                 <i class="fas fa-copy mr-1"></i>Copy
                               </button>
                               <button
                                 class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                                data-index="${configIndex}"
+                                data-url-index="${urlIndex}"
+                                data-config-index="${configIndex}"
                               >
                                 <i class="fas fa-download mr-1"></i>Download
                               </button>
@@ -803,6 +837,49 @@ function renderResults() {
                   `,
 										)
 										.join("")}
+                  ${
+										urlResult.fullCss
+											? `
+                    <div class="border rounded-lg">
+                      <div class="p-3 border-b bg-gray-50">
+                        <div class="flex items-center gap-3">
+                          <i class="fas fa-file-code text-purple-600 text-sm"></i>
+                          <div class="flex-1">
+                            <div class="font-medium text-sm">CSS completo da página</div>
+                            <div class="text-xs text-gray-500">
+                              Todo o CSS usado pela página, não só o crítico acima da dobra
+                              • ${formatFileSize(urlResult.fullCss.size)}
+                            </div>
+                          </div>
+                          <span class="px-2 py-1 text-xs rounded bg-purple-100 text-purple-800">Full CSS</span>
+                        </div>
+                      </div>
+                      <div class="p-3">
+                        <div class="space-y-3">
+                          <div class="flex gap-2">
+                            <button
+                              class="copy-full-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                              data-url-index="${urlIndex}"
+                            >
+                              <i class="fas fa-copy mr-1"></i>Copy
+                            </button>
+                            <button
+                              class="download-full-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                              data-url-index="${urlIndex}"
+                            >
+                              <i class="fas fa-download mr-1"></i>Download
+                            </button>
+                          </div>
+                          <textarea
+                            readonly
+                            class="w-full h-32 p-2 font-mono text-xs border border-gray-300 rounded-md bg-gray-50"
+                          >${urlResult.fullCss.css}</textarea>
+                        </div>
+                      </div>
+                    </div>
+                  `
+											: ""
+									}
                 </div>
               </div>
             `
@@ -845,7 +922,7 @@ function renderResults() {
                   <i class="fas fa-copy mr-1"></i>Copy
                 </button>
                 <button
-                  class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                  class="download-btn-optimized px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
                 >
                   <i class="fas fa-download mr-1"></i>Download
                 </button>
@@ -893,6 +970,7 @@ function render() {
 
       ${renderConfigurationCard()}
       ${renderResults()}
+      ${renderManualCaptureSection()}
     </div>
   `;
 	attachEventListeners();
@@ -901,11 +979,34 @@ function render() {
 function attachEventListeners() {
 	document.querySelectorAll(".copy-btn").forEach((btn) => {
 		btn.addEventListener("click", () => {
-			const index = btn.dataset.index;
-			const result = state.results[index].configs[0];
-			handleCopy(result.css, result.config.name, state.results[index].url);
+			const { urlIndex, configIndex } = btn.dataset;
+			const urlResult = state.results[urlIndex];
+			const configResult = urlResult.configs[configIndex];
+			handleCopy(configResult.css, configResult.config.name, urlResult.url);
 		});
 	});
+	document.querySelectorAll(".download-btn").forEach((btn) => {
+		btn.addEventListener("click", () => {
+			const { urlIndex, configIndex } = btn.dataset;
+			const urlResult = state.results[urlIndex];
+			const configResult = urlResult.configs[configIndex];
+			handleDownload(configResult.css, configResult.config.name, urlResult.url);
+		});
+	});
+
+	document.querySelectorAll(".copy-full-btn").forEach((btn) => {
+		btn.addEventListener("click", () => {
+			const urlResult = state.results[btn.dataset.urlIndex];
+			handleCopy(urlResult.fullCss.css, "Full CSS", urlResult.url);
+		});
+	});
+	document.querySelectorAll(".download-full-btn").forEach((btn) => {
+		btn.addEventListener("click", () => {
+			const urlResult = state.results[btn.dataset.urlIndex];
+			handleDownload(urlResult.fullCss.css, "full", urlResult.url);
+		});
+	});
+
 	document.querySelectorAll(".copy-btn-optimized").forEach((btn) => {
 		btn.addEventListener("click", () => {
 			const result = state.optimizedCSS;
@@ -913,31 +1014,34 @@ function attachEventListeners() {
 			handleCopy(result.css, urlsLength, result.url);
 		});
 	});
-
-	document.querySelectorAll(".download-btn").forEach((btn) => {
+	document.querySelectorAll(".download-btn-optimized").forEach((btn) => {
 		btn.addEventListener("click", () => {
-			const index = btn.dataset.index;
-			const result = state.results[index].configs[0];
-			handleDownload(result.css, result.config.name, state.results[index].url);
+			const result = state.optimizedCSS;
+			handleDownload(result.css, "optimized", result.url);
+		});
+	});
+
+	document.querySelectorAll(".delete-capture-btn").forEach((btn) => {
+		btn.addEventListener("click", () => {
+			handleDeleteCapture(btn.dataset.url);
 		});
 	});
 }
 
 // Initialize the app
 render();
+loadCaptures();
 
 // Make functions globally available
 window.addUrl = addUrl;
 window.removeUrl = removeUrl;
 window.updateUrl = updateUrl;
 window.loadSampleUrls = loadSampleUrls;
-window.handleConfigToggle = handleConfigToggle;
-window.selectAllDesktop = selectAllDesktop;
-window.selectAllMobile = selectAllMobile;
 window.handleBatchGenerate = handleBatchGenerate;
 window.handleCopy = handleCopy;
 window.handleDownload = handleDownload;
 window.handleDownloadAll = handleDownloadAll;
 window.exportBatchResults = exportBatchResults;
+window.handleRetryFailed = handleRetryFailed;
 window.state = state;
 window.render = render;
