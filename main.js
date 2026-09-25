@@ -16,6 +16,38 @@ const presetConfigs = {
   },
 };
 
+// Elementos HTML / Seletores excluídos por padrão na geração do CSS crítico
+const defaultExcludedSelectors = [
+  "header",
+  "#header",
+  ".modal",
+  "#onetrust-banner-sdk",
+];
+
+function loadExcludedSelectors() {
+  try {
+    const saved = localStorage.getItem("critical_css_excluded_selectors");
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {
+    console.warn("Could not load excluded selectors from localStorage", e);
+  }
+  return [...defaultExcludedSelectors];
+}
+
+function saveExcludedSelectors(selectors) {
+  try {
+    localStorage.setItem(
+      "critical_css_excluded_selectors",
+      JSON.stringify(selectors),
+    );
+  } catch (e) {
+    console.warn("Could not save excluded selectors to localStorage", e);
+  }
+}
+
 // State management
 const state = {
   urls: ["https://www.receitasnestle.com.br"],
@@ -28,6 +60,7 @@ const state = {
   currentJobId: null,
   lastJobId: null,
   captures: [],
+  excludedSelectors: loadExcludedSelectors(),
 };
 
 // Utility functions
@@ -101,6 +134,58 @@ function loadSampleUrls() {
   render();
 }
 
+// Gerenciamento de elementos HTML excluídos
+function addExcludedSelector(selector) {
+  if (!selector) return;
+  const trimmed = selector.trim();
+  if (!trimmed) return;
+
+  const parts = trimmed
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  let added = false;
+  for (const part of parts) {
+    if (!state.excludedSelectors.includes(part)) {
+      state.excludedSelectors.push(part);
+      added = true;
+    }
+  }
+
+  if (added) {
+    saveExcludedSelectors(state.excludedSelectors);
+    render();
+  }
+}
+
+function removeExcludedSelector(index) {
+  if (index >= 0 && index < state.excludedSelectors.length) {
+    state.excludedSelectors.splice(index, 1);
+    saveExcludedSelectors(state.excludedSelectors);
+    render();
+  }
+}
+
+function resetExcludedSelectors() {
+  state.excludedSelectors = [...defaultExcludedSelectors];
+  saveExcludedSelectors(state.excludedSelectors);
+  render();
+  showToast(
+    "Seletores excluídos restaurados para os padrões (header, .modal, #header, #onetrust-banner-sdk)",
+  );
+}
+
+function handleAddExcludedSelector() {
+  const input = document.getElementById("new-selector-input");
+  if (!input) return;
+  const val = input.value;
+  if (val && val.trim()) {
+    addExcludedSelector(val);
+    input.value = "";
+  }
+}
+
 // Batch processing
 async function handleBatchGenerate() {
   const validUrls = state.urls.filter((url) => url.trim() !== "");
@@ -141,6 +226,7 @@ async function handleBatchGenerate() {
         configs,
         combineDimensions: state.combineDimensions,
         batchId: jobId,
+        excludedSelectors: state.excludedSelectors,
       }),
     });
 
@@ -428,6 +514,80 @@ function renderUrlsSection() {
   `;
 }
 
+function renderExcludedElementsSection() {
+  const hasSelectors =
+    state.excludedSelectors && state.excludedSelectors.length > 0;
+
+  return `
+    <div class="space-y-3 pt-4 border-t border-gray-100">
+      <div class="flex items-center justify-between">
+        <div>
+          <label class="text-base font-medium text-gray-900 flex items-center">
+            <i class="fas fa-filter text-amber-500 mr-2"></i>
+            Elementos HTML Excluídos
+          </label>
+          <p class="text-xs text-gray-500 mt-0.5">
+            Tags e classes CSS que serão removidas do DOM antes da análise (não entrarão no CSS crítico).
+          </p>
+        </div>
+        <button
+          type="button"
+          onclick="resetExcludedSelectors()"
+          class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium hover:underline cursor-pointer"
+          title="Restaurar padrões (header, .modal)"
+        >
+          <i class="fas fa-rotate-left"></i> Restaurar padrões
+        </button>
+      </div>
+
+      <!-- Tag list -->
+      <div class="flex flex-wrap items-center gap-2 min-h-[42px] p-2.5 bg-gray-50 rounded-lg border border-gray-200">
+        ${
+          hasSelectors
+            ? state.excludedSelectors
+                .map(
+                  (selector, index) => `
+              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white text-gray-800 border border-gray-300 rounded-md text-xs font-mono font-medium shadow-sm hover:border-red-300 transition-colors">
+                <span>${selector}</span>
+                <button
+                  type="button"
+                  onclick="removeExcludedSelector(${index})"
+                  class="text-gray-400 hover:text-red-600 focus:outline-none p-0.5 rounded cursor-pointer"
+                  title="Remover '${selector}'"
+                >
+                  <i class="fas fa-times text-xs"></i>
+                </button>
+              </span>
+            `,
+                )
+                .join("")
+            : `<span class="text-xs text-gray-400 italic">Nenhum seletor excluído (todo o HTML será considerado no CSS crítico).</span>`
+        }
+      </div>
+
+      <!-- Add new selector input -->
+      <div class="flex items-center gap-2">
+        <div class="relative flex-1">
+          <input
+            id="new-selector-input"
+            type="text"
+            placeholder="Ex: header, .modal, #cookie-banner, .popup"
+            class="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            onkeydown="if(event.key === 'Enter') { event.preventDefault(); handleAddExcludedSelector(); }"
+          />
+        </div>
+        <button
+          type="button"
+          onclick="handleAddExcludedSelector()"
+          class="px-3 py-1.5 text-sm bg-gray-800 text-white rounded-md hover:bg-gray-900 flex items-center gap-1.5 transition-colors cursor-pointer"
+        >
+          <i class="fas fa-plus text-xs"></i> Adicionar
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 function renderConfigurationCard() {
   return `
     <div class="bg-white rounded-lg shadow-md p-6 space-y-6">
@@ -437,6 +597,8 @@ function renderConfigurationCard() {
       </div>
 
       ${renderUrlsSection()}
+
+      ${renderExcludedElementsSection()}
 
       <div class="space-y-4">
         <div class="flex items-center justify-between">
@@ -1047,3 +1209,7 @@ window.exportBatchResults = exportBatchResults;
 window.handleRetryFailed = handleRetryFailed;
 window.state = state;
 window.render = render;
+window.addExcludedSelector = addExcludedSelector;
+window.removeExcludedSelector = removeExcludedSelector;
+window.resetExcludedSelectors = resetExcludedSelectors;
+window.handleAddExcludedSelector = handleAddExcludedSelector;

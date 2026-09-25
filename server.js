@@ -22,6 +22,11 @@ import {
   listCaptures,
 } from './lib/manual-capture.js';
 import { getDomainInfo } from './lib/domain-strategy.js';
+import {
+  removeExcludedElements,
+  buildCssIgnoreRules,
+  filterCssByExcludedRules,
+} from './lib/html-cleaner.js';
 
 function hostnameOf(url) {
   try {
@@ -71,7 +76,18 @@ async function optimizeCSS(css) {
 // Critical CSS generation endpoint for multiple URLs
 app.post('/api/critical/batch', async (req, res) => {
   try {
-    const { urls, configs, combineDimensions = false, batchId } = req.body;
+    const {
+      urls,
+      configs,
+      combineDimensions = false,
+      batchId,
+      excludedSelectors = [
+        'header',
+        '#header',
+        '.modal',
+        '#onetrust-banner-sdk',
+      ],
+    } = req.body;
 
     if (!urls || !Array.isArray(urls) || urls.length === 0) {
       return res.status(400).json({ error: 'At least one URL is required' });
@@ -114,6 +130,7 @@ app.post('/api/critical/batch', async (req, res) => {
       startTime: new Date(),
       configs,
       combineDimensions,
+      excludedSelectors,
     });
     await jobStore.persist(batchJobs);
 
@@ -192,6 +209,24 @@ app.post('/api/critical/batch', async (req, res) => {
             };
           }
 
+          let cleanHtml = renderedHtml;
+          if (Array.isArray(excludedSelectors) && excludedSelectors.length > 0) {
+            const cleanResult = removeExcludedElements(
+              renderedHtml,
+              excludedSelectors,
+            );
+            cleanHtml = cleanResult.html;
+            if (cleanResult.removedCount > 0) {
+              console.log(
+                `  🧹 Removed ${cleanResult.removedCount} excluded DOM element(s) matching: ${cleanResult.removedDetails
+                  .map((d) => `${d.selector} (${d.count})`)
+                  .join(', ')}`,
+              );
+            }
+          }
+
+          const ignoreRules = buildCssIgnoreRules(excludedSelectors);
+
           if (combineDimensions && configs.length > 1) {
             // Generate single CSS for multiple dimensions
             try {
@@ -216,7 +251,7 @@ app.post('/api/critical/batch', async (req, res) => {
 
               const criticalCSS = await critical.generate({
                 base: 'base/',
-                html: renderedHtml,
+                html: cleanHtml,
                 dimensions: dimensions,
                 inline: false,
                 extract: false,
@@ -229,7 +264,7 @@ app.post('/api/critical/batch', async (req, res) => {
                 rebase: false,
                 ignore: {
                   atrule: ['@font-face', '@keyframes'],
-                  rule: [/modal/, /tint/],
+                  rule: ignoreRules,
                   decl: (node, value) => {
                     const isSvg = /\.svg/.test(value);
                     const isIgnoredFile = node.source?.input?.file
@@ -249,8 +284,14 @@ app.post('/api/critical/batch', async (req, res) => {
                   timeout: 180000, // aumenta o tempo limite (3min) — páginas com muito CSS (ex: SPAs com CSS-in-JS) demoram mais
                   strict: false, // evita erros fatais por regras CSS inválidas
                   renderWaitTime: 500, // espera um pouco mais antes de tirar o "snapshot"
+                  forceExclude: ignoreRules,
                 },
               });
+
+              const finalCss = filterCssByExcludedRules(
+                criticalCSS.css,
+                ignoreRules,
+              );
 
               urlResults.configs.push({
                 config: {
@@ -262,7 +303,7 @@ app.post('/api/critical/batch', async (req, res) => {
                   height: Math.max(...configs.map((c) => c.height)),
                   dimensions: dimensions,
                 },
-                css: criticalCSS.css,
+                css: finalCss,
                 success: true,
                 combined: true,
               });
@@ -294,7 +335,7 @@ app.post('/api/critical/batch', async (req, res) => {
 
                 const criticalCSS = await critical.generate({
                   base: 'base/',
-                  html: renderedHtml,
+                  html: cleanHtml,
                   width: config.width,
                   height: config.height,
                   inline: false,
@@ -302,8 +343,8 @@ app.post('/api/critical/batch', async (req, res) => {
                   ignoreInlinedStyles: false,
                   rebase: false,
                   ignore: {
-                    atrule: ['@font-face'],
-                    rule: [/some-regexp/],
+                    atrule: ['@font-face', '@keyframes'],
+                    rule: ignoreRules,
                     decl: (node, value) => /big-image\.png/.test(value),
                   },
                   penthouse: {
@@ -313,12 +354,18 @@ app.post('/api/critical/batch', async (req, res) => {
                     timeout: 180000,
                     strict: false,
                     renderWaitTime: 500,
+                    forceExclude: ignoreRules,
                   },
                 });
 
+                const finalCss = filterCssByExcludedRules(
+                  criticalCSS.css,
+                  ignoreRules,
+                );
+
                 urlResults.configs.push({
                   config,
-                  css: criticalCSS.css,
+                  css: finalCss,
                   success: true,
                   combined: false,
                 });
@@ -477,6 +524,7 @@ app.post('/api/critical/batch/:jobId/retry', async (req, res) => {
     urls: failedUrls,
     configs: originalJob.configs,
     combineDimensions: originalJob.combineDimensions,
+    excludedSelectors: originalJob.excludedSelectors,
   };
 
   return app._router.handle(
@@ -530,13 +578,14 @@ app.get('/api/domain-info', async (req, res) => {
 
 // Single URL endpoint (backward compatibility)
 app.post('/api/critical', async (req, res) => {
-  const { url, configs, combineDimensions } = req.body;
+  const { url, configs, combineDimensions, excludedSelectors } = req.body;
 
   // Convert single URL to batch format
   const batchRequest = {
     urls: [url],
     configs,
     combineDimensions,
+    excludedSelectors,
   };
 
   // Forward to batch endpoint
