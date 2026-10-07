@@ -239,16 +239,9 @@ app.post('/api/critical/batch', async (req, res) => {
                 `  🔄 Generating combined critical CSS for ${dimensions.length} dimensions...`,
               );
 
-              const ignoredFiles = [
-                'library-svgs.css',
-                'print.css',
-                'jquery-ui.css',
-                'ln_tint_global.css',
-                'ln_tint_connector_styles',
-                'ln_srh_menuiq',
-                'mmiq-new.css',
-              ];
-
+              // Ignored stylesheets (library-svgs.css, print.css, ...) are
+              // already dropped from the snapshot in visitUrl — see
+              // IGNORED_STYLESHEETS in lib/browser-manager.js.
               const criticalCSS = await critical.generate({
                 base: 'base/',
                 html: cleanHtml,
@@ -267,14 +260,9 @@ app.post('/api/critical/batch', async (req, res) => {
                   rule: ignoreRules,
                   decl: (node, value) => {
                     const isSvg = /\.svg/.test(value);
-                    const isIgnoredFile = node.source?.input?.file
-                      ? ignoredFiles.some((file) =>
-                          node.source.input.file.includes(file),
-                        )
-                      : false;
                     const isAnimation = /animation|transition/.test(node.prop);
 
-                    return isSvg || isIgnoredFile || isAnimation;
+                    return isSvg || isAnimation;
                   },
                 },
                 penthouse: {
