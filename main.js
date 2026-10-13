@@ -134,16 +134,46 @@ function loadSampleUrls() {
   render();
 }
 
+function splitSelectors(input) {
+  const result = [];
+  let current = '';
+  let inQuotes = null;
+  let bracketDepth = 0;
+
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+    if ((char === '"' || char === "'") && (i === 0 || input[i - 1] !== '\\')) {
+      if (inQuotes === char) {
+        inQuotes = null;
+      } else if (!inQuotes) {
+        inQuotes = char;
+      }
+    } else if (!inQuotes) {
+      if (char === '[' || char === '(') {
+        bracketDepth++;
+      } else if (char === ']' || char === ')') {
+        if (bracketDepth > 0) bracketDepth--;
+      } else if (char === ',' && bracketDepth === 0) {
+        const item = current.trim();
+        if (item) result.push(item);
+        current = '';
+        continue;
+      }
+    }
+    current += char;
+  }
+  const last = current.trim();
+  if (last) result.push(last);
+  return result;
+}
+
 // Gerenciamento de elementos HTML excluídos
 function addExcludedSelector(selector) {
   if (!selector) return;
   const trimmed = selector.trim();
   if (!trimmed) return;
 
-  const parts = trimmed
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const parts = splitSelectors(trimmed);
 
   let added = false;
   for (const part of parts) {
@@ -527,7 +557,7 @@ function renderExcludedElementsSection() {
             Elementos HTML Excluídos
           </label>
           <p class="text-xs text-gray-500 mt-0.5">
-            Tags e classes CSS que serão removidas do DOM antes da análise (não entrarão no CSS crítico).
+            Tags, classes, IDs e seletores de atributos (ex: [class*="onetrust"], .modal, header) removidos do DOM antes da análise.
           </p>
         </div>
         <button
@@ -571,7 +601,7 @@ function renderExcludedElementsSection() {
           <input
             id="new-selector-input"
             type="text"
-            placeholder="Ex: header, .modal, #cookie-banner, .popup"
+            placeholder="Ex: [class*=&quot;onetrust&quot;], header, .modal, #cookie-banner"
             class="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
             onkeydown="if(event.key === 'Enter') { event.preventDefault(); handleAddExcludedSelector(); }"
           />

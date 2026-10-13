@@ -26,7 +26,9 @@ import {
   removeExcludedElements,
   buildCssIgnoreRules,
   filterCssByExcludedRules,
+  sanitizeHtmlStyles,
 } from './lib/html-cleaner.js';
+import { sanitizeCss } from './lib/css-sanitizer.js';
 
 function hostnameOf(url) {
   try {
@@ -54,6 +56,8 @@ const batchJobs = new Map();
 await jobStore.loadInto(batchJobs);
 
 async function optimizeCSS(css) {
+  if (!css || !css.trim()) return '';
+  const sanitized = sanitizeCss(css);
   const result = await postcss([
     combineSelectors({
       removeDuplicatedProperties: true,
@@ -68,7 +72,7 @@ async function optimizeCSS(css) {
         },
       ],
     }),
-  ]).process(css);
+  ]).process(sanitized, { from: undefined });
 
   return result.css;
 }
@@ -224,6 +228,7 @@ app.post('/api/critical/batch', async (req, res) => {
               );
             }
           }
+          cleanHtml = sanitizeHtmlStyles(cleanHtml);
 
           const ignoreRules = buildCssIgnoreRules(excludedSelectors);
 
