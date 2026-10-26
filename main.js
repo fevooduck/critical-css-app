@@ -17,72 +17,91 @@ const presetConfigs = {
 };
 
 // Elementos HTML / Seletores excluídos por padrão na geração do CSS crítico
+// Seletores internos de modais e banners excluídos na análise do CSS crítico
 const defaultExcludedSelectors = [
-  "header",
-  "#header",
   ".modal",
   "#onetrust-banner-sdk",
+  ".dropdown-content",
 ];
-
-function loadExcludedSelectors() {
-  try {
-    const saved = localStorage.getItem("critical_css_excluded_selectors");
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch (e) {
-    console.warn("Could not load excluded selectors from localStorage", e);
-  }
-  return [...defaultExcludedSelectors];
-}
-
-function saveExcludedSelectors(selectors) {
-  try {
-    localStorage.setItem(
-      "critical_css_excluded_selectors",
-      JSON.stringify(selectors),
-    );
-  } catch (e) {
-    console.warn("Could not save excluded selectors to localStorage", e);
-  }
-}
 
 // State management
 const state = {
-  urls: ["https://www.receitasnestle.com.br"],
+  urls: [""],
   results: [],
-  optimizedCSS: [],
+  optimizedCSS: null,
   isLoading: false,
   error: "",
-  combineDimensions: true,
+  combineDimensions: false,
+  aggressivePruning: true,
+  isolateFirstFold: true,
   batchProgress: null,
   currentJobId: null,
   lastJobId: null,
   captures: [],
-  excludedSelectors: loadExcludedSelectors(),
+  excludedSelectors: [...defaultExcludedSelectors],
+  showBatchPaste: false,
 };
 
-// Utility functions
+// Minimalist OpenAI Toast Notification
 function showToast(message, type = "success") {
+  const existing = document.getElementById("openai-toast");
+  if (existing) existing.remove();
+
   const toast = document.createElement("div");
-  toast.className = `fixed top-4 right-4 p-4 rounded-lg shadow-lg z-50 ${
-    type === "success"
-      ? "bg-green-500 text-white"
+  toast.id = "openai-toast";
+  toast.className = `fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-full text-sm font-medium border shadow-sm transition-all duration-200 transform translate-y-0 ${
+    type === "error"
+      ? "bg-paper text-obsidian border-rose-300 shadow-rose-100"
       : type === "info"
-        ? "bg-blue-500 text-white"
-        : "bg-red-500 text-white"
+        ? "bg-paper text-obsidian border-hairline"
+        : "bg-obsidian text-paper border-obsidian"
   }`;
-  toast.textContent = message;
+
+  const dot =
+    type === "error"
+      ? '<span class="w-2 h-2 rounded-full bg-rose-500 shrink-0"></span>'
+      : type === "info"
+        ? '<span class="w-2 h-2 rounded-full bg-graphite shrink-0"></span>'
+        : '<span class="w-2 h-2 rounded-full bg-emerald-400 shrink-0"></span>';
+
+  toast.innerHTML = `${dot}<span class="max-w-md truncate">${message}</span>`;
   document.body.appendChild(toast);
 
   setTimeout(() => {
-    toast.remove();
+    toast.style.opacity = "0";
+    toast.style.transform = "translateY(8px)";
+    setTimeout(() => toast.remove(), 250);
   }, 4000);
 }
 
 function formatFileSize(bytes) {
-  return Math.round(bytes / 1024) + "KB";
+  if (bytes === undefined || bytes === null || isNaN(bytes)) return "0KB";
+  return (bytes / 1024).toFixed(1) + "KB";
+}
+
+// Editorial Budget Badge with restrained indicator dots
+function renderBudgetBadge(budget) {
+  if (!budget) return "";
+  const gzipKb = (budget.gzipBytes / 1024).toFixed(1);
+  if (budget.status === "optimal") {
+    return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-ash border border-hairline text-obsidian" title="${budget.message}">
+      <span class="w-1.5 h-1.5 rounded-full bg-black"></span>
+      <span>${gzipKb}KB gzip</span>
+      <span class="text-graphite">· 1º RTT Ideal (&le;10KB)</span>
+    </span>`;
+  }
+  if (budget.status === "warning") {
+    return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-ash border border-hairline text-obsidian" title="${budget.message}">
+      <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+      <span>${gzipKb}KB gzip</span>
+      <span class="text-graphite">· No Limite (10-14.6KB)</span>
+    </span>`;
+  }
+  return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-ash border border-hairline text-obsidian" title="${budget.message}">
+    <span class="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+    <span>${gzipKb}KB gzip</span>
+    <span class="text-graphite">· Excedido (&gt;14.6KB)</span>
+  </span>`;
 }
 
 function formatTime(ms) {
@@ -98,6 +117,12 @@ function formatTime(ms) {
 function addUrl() {
   state.urls.push("");
   render();
+  setTimeout(() => {
+    const inputs = document.querySelectorAll(".url-input");
+    if (inputs.length > 0) {
+      inputs[inputs.length - 1].focus();
+    }
+  }, 50);
 }
 
 function removeUrl(index) {
@@ -109,89 +134,71 @@ function removeUrl(index) {
 
 function updateUrl(index, value) {
   state.urls[index] = value;
-  render();
+  const validCount = state.urls.map((u) => u.trim()).filter((u) => u !== "").length;
+  const countEl = document.getElementById("valid-urls-count");
+  if (countEl) {
+    countEl.textContent = `${validCount} URL${validCount === 1 ? "" : "s"} válida${validCount === 1 ? "" : "s"} para processamento`;
+  }
 }
 
-function loadSampleUrls() {
-  state.urls = [
-    "https://www.receitasnestle.com.br",
-    "https://www.receitasnestle.com.br/nossas-receitas/receitas-festa-junina",
-    "https://www.receitasnestle.com.br/aulas-on-line",
-    "https://www.receitasnestle.com.br/aulas-on-line/curso-de-bolos-especiais-com-beca-milano",
-    "https://www.receitasnestle.com.br/aulas-on-line/curso-de-bolos-especiais-com-beca-milano/bolo-baba-de-moca-com-nozes",
-    "https://www.receitasnestle.com.br/livros-de-receitas",
-    "https://www.receitasnestle.com.br/nossas-receitas",
-    "https://www.receitasnestle.com.br/receitas/receita-morango-amor",
-    "https://www.receitasnestle.com.br/artigos/receitas-caldo",
-    "https://www.receitasnestle.com.br/artigos",
-    "https://www.receitasnestle.com.br/artigos/alimentacao-saudavel",
-    "https://www.receitasnestle.com.br/listas-de-receitas",
-    "https://www.receitasnestle.com.br/listas-de-receitas/receitas-da-nutricionista-beatriz-forli",
-    "https://www.receitasnestle.com.br/videos",
-    "https://www.receitasnestle.com.br/videos/faz-na-air-fryer",
-    "https://www.receitasnestle.com.br/videos/faz-na-air-fryer/mais-saudaveis",
-  ];
+function clearUrls() {
+  state.urls = [""];
+  state.results = [];
   render();
+  showToast("Lista limpa", "info");
 }
 
-// Gerenciamento de elementos HTML excluídos
-function addExcludedSelector(selector) {
-  if (!selector) return;
-  const trimmed = selector.trim();
-  if (!trimmed) return;
+function toggleBatchPaste() {
+  state.showBatchPaste = !state.showBatchPaste;
+  render();
+  if (state.showBatchPaste) {
+    setTimeout(() => {
+      const textarea = document.getElementById("batch-paste-textarea");
+      if (textarea) textarea.focus();
+    }, 50);
+  }
+}
 
-  const parts = trimmed
-    .split(",")
+function applyBatchUrls(text) {
+  const lines = text
+    .split(/[\r\n]+/)
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter((s) => s.length > 0);
 
-  let added = false;
-  for (const part of parts) {
-    if (!state.excludedSelectors.includes(part)) {
-      state.excludedSelectors.push(part);
-      added = true;
+  if (lines.length > 0) {
+    state.urls = lines;
+    state.showBatchPaste = false;
+    render();
+    showToast(`${lines.length} URL${lines.length === 1 ? "" : "s"} carregada${lines.length === 1 ? "" : "s"} na lista.`);
+  } else {
+    showToast("Nenhuma URL identificada no texto.", "error");
+  }
+}
+
+function handlePasteUrls(e, index) {
+  const pasteData = (e.clipboardData || window.clipboardData)?.getData("text");
+  if (pasteData && (pasteData.includes("\n") || pasteData.includes("\r"))) {
+    e.preventDefault();
+    const lines = pasteData
+      .split(/[\r\n]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (lines.length > 0) {
+      const before = state.urls.slice(0, index);
+      const after = state.urls.slice(index + 1);
+      state.urls = [...before, ...lines, ...after];
+      render();
+      showToast(`${lines.length} URLs adicionadas com sucesso.`);
     }
-  }
-
-  if (added) {
-    saveExcludedSelectors(state.excludedSelectors);
-    render();
-  }
-}
-
-function removeExcludedSelector(index) {
-  if (index >= 0 && index < state.excludedSelectors.length) {
-    state.excludedSelectors.splice(index, 1);
-    saveExcludedSelectors(state.excludedSelectors);
-    render();
-  }
-}
-
-function resetExcludedSelectors() {
-  state.excludedSelectors = [...defaultExcludedSelectors];
-  saveExcludedSelectors(state.excludedSelectors);
-  render();
-  showToast(
-    "Seletores excluídos restaurados para os padrões (header, .modal, #header, #onetrust-banner-sdk)",
-  );
-}
-
-function handleAddExcludedSelector() {
-  const input = document.getElementById("new-selector-input");
-  if (!input) return;
-  const val = input.value;
-  if (val && val.trim()) {
-    addExcludedSelector(val);
-    input.value = "";
   }
 }
 
 // Batch processing
 async function handleBatchGenerate() {
-  const validUrls = state.urls.filter((url) => url.trim() !== "");
+  const validUrls = state.urls.map((u) => u.trim()).filter((u) => u !== "");
 
   if (validUrls.length === 0) {
-    state.error = "Please enter at least one valid URL";
+    state.error = "Por favor, insira pelo menos uma URL válida.";
     render();
     return;
   }
@@ -204,7 +211,6 @@ async function handleBatchGenerate() {
   render();
 
   try {
-    // Fixed, standardized viewports (see presetConfigs) — not user-selectable
     const configs = Object.values(presetConfigs);
     const jobId = `batch_${Date.now()}_${Math.random()
       .toString(36)
@@ -212,7 +218,7 @@ async function handleBatchGenerate() {
     state.currentJobId = jobId;
 
     showToast(
-      `Starting batch processing of ${validUrls.length} URLs...`,
+      `Iniciando extração de CSS para ${validUrls.length} URLs...`,
       "info",
     );
 
@@ -227,13 +233,15 @@ async function handleBatchGenerate() {
         combineDimensions: state.combineDimensions,
         batchId: jobId,
         excludedSelectors: state.excludedSelectors,
+        aggressivePruning: state.aggressivePruning,
+        isolateFirstFold: state.isolateFirstFold,
       }),
     });
 
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || "Failed to generate critical CSS");
+      throw new Error(data.error || "Falha ao gerar o CSS crítico");
     }
 
     state.results = data.results;
@@ -243,11 +251,7 @@ async function handleBatchGenerate() {
 
     const { summary } = data;
     showToast(
-      `Batch Complete! ${summary.successfulUrls}/${
-        summary.totalUrls
-      } URLs processed, ${
-        summary.successfulConfigs
-      } CSS files generated in ${formatTime(summary.processingTime)}`,
+      `Concluído! ${summary.successfulUrls}/${summary.totalUrls} URLs processadas com sucesso.`,
     );
   } catch (err) {
     state.error = err.message;
@@ -260,56 +264,94 @@ async function handleBatchGenerate() {
 }
 
 // Export functions
-async function handleCopy(css, configName, url) {
-  const wrapped = `<style>\n${css}\n</style>`;
+function buildHtmlMediaBlock(urlResult) {
+  if (!urlResult || !urlResult.configs) return "";
+
+  const mobileConfig = urlResult.configs.find(
+    (c) =>
+      c.success &&
+      (c.config?.device === "mobile" ||
+        (c.config?.width && c.config.width < 768)),
+  );
+  const desktopConfig = urlResult.configs.find(
+    (c) =>
+      c.success &&
+      (c.config?.device === "desktop" ||
+        (c.config?.width && c.config.width >= 768)),
+  );
+
+  if (mobileConfig && desktopConfig) {
+    return `<!-- ======================================================== -->\n<!-- 1. CSS Crítico Mobile (≤991.98px) • ${formatFileSize(
+      mobileConfig.gzipSize,
+    )} gzip -->\n<!-- ======================================================== -->\n<style media="(max-width: 991.98px)">\n${
+      mobileConfig.css
+    }\n</style>\n\n<!-- ======================================================== -->\n<!-- 2. CSS Crítico Desktop (≥992px) • ${formatFileSize(
+      desktopConfig.gzipSize,
+    )} gzip -->\n<!-- ======================================================== -->\n<style media="(min-width: 992px)">\n${
+      desktopConfig.css
+    }\n</style>`;
+  }
+
+  const single = urlResult.configs.find((c) => c.success);
+  if (single) {
+    return `<style>\n${single.css}\n</style>`;
+  }
+  return "";
+}
+
+async function handleCopyHtmlBlock(urlResult, btn) {
+  const block = buildHtmlMediaBlock(urlResult);
+  if (!block) return;
   try {
-    await navigator.clipboard.writeText(wrapped);
-    showToast(
-      `${configName} CSS from ${new URL(url).hostname} copied to clipboard`,
-    );
+    await navigator.clipboard.writeText(block);
+    showToast("Bloco Drupal copiado para a área de transferência.");
+    if (btn) {
+      const origHtml = btn.innerHTML;
+      btn.innerHTML =
+        '<i class="fas fa-check text-xs"></i> <span>Copiado!</span>';
+      setTimeout(() => {
+        btn.innerHTML = origHtml;
+      }, 2000);
+    }
   } catch (err) {
-    console.error("Failed to copy to clipboard:", url);
-    showToast("Failed to copy to clipboard", "error");
+    showToast("Falha ao copiar bloco HTML", "error");
   }
 }
 
-function handleDownload(css, configName, url) {
-  const hostname = new URL(url).hostname.replace(/\./g, "-");
-  const blob = new Blob([css], { type: "text/css" });
+function handleDownloadHtmlBlock(urlResult) {
+  const block = buildHtmlMediaBlock(urlResult);
+  if (!block) return;
+  const parsedUrl = new URL(urlResult.url);
+  const hostname = parsedUrl.hostname.replace(/\./g, "-");
+  const pathname = parsedUrl.pathname
+    .replace(/[^a-zA-Z0-9]/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const suffix = pathname ? `-${pathname}` : "";
+  const filename = `critical-block-${hostname}${suffix}.html`;
+
+  const blob = new Blob([block], { type: "text/html" });
   const downloadUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = downloadUrl;
-  a.download = `critical-${hostname}-${configName
-    .toLowerCase()
-    .replace(/\s+/g, "-")}.css`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(downloadUrl);
-
-  showToast(`${configName} CSS from ${hostname} downloaded`);
+  showToast(`Bloco HTML baixado: ${filename}`);
 }
 
 function handleDownloadAll() {
   let downloadCount = 0;
-
   state.results.forEach((urlResult) => {
     if (urlResult.success) {
-      urlResult.configs.forEach((configResult) => {
-        if (configResult.success) {
-          handleDownload(
-            configResult.css,
-            configResult.config.name,
-            urlResult.url,
-          );
-          downloadCount++;
-        }
-      });
+      handleDownloadHtmlBlock(urlResult);
+      downloadCount++;
     }
   });
 
   if (downloadCount > 0) {
-    showToast(`Downloaded ${downloadCount} CSS files`);
+    showToast(`Baixados ${downloadCount} arquivos de bloco Drupal (.html)`);
   }
 }
 
@@ -357,10 +399,9 @@ function exportBatchResults() {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 
-  showToast("Batch results exported as JSON");
+  showToast("Resultados exportados em JSON");
 }
 
-// Retry only the URLs that failed in the last batch job
 async function handleRetryFailed() {
   if (!state.lastJobId) return;
 
@@ -375,7 +416,7 @@ async function handleRetryFailed() {
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || "Failed to retry");
+      throw new Error(data.error || "Falha ao reprocessar");
     }
 
     const retriedByUrl = new Map(data.results.map((r) => [r.url, r]));
@@ -383,7 +424,7 @@ async function handleRetryFailed() {
     state.lastJobId = data.jobId;
 
     showToast(
-      `Retry: ${data.summary.successfulUrls}/${data.summary.totalUrls} succeeded. (O CSS otimizado combinado acima ainda é o da execução original.)`,
+      `Reprocessamento: ${data.summary.successfulUrls}/${data.summary.totalUrls} executadas.`,
     );
   } catch (err) {
     showToast(err.message, "error");
@@ -393,7 +434,7 @@ async function handleRetryFailed() {
   }
 }
 
-// Manual capture (fallback for domains that block every automated path)
+// Manual capture bookmarklet
 function buildBookmarklet() {
   const apiOrigin = `${location.protocol}//${location.hostname}:9001`;
   const code = `
@@ -444,232 +485,349 @@ async function handleDeleteCapture(url) {
       body: JSON.stringify({ url }),
     });
     await loadCaptures();
-    showToast("Captura removida");
+    showToast("Captura manual removida");
   } catch (err) {
     showToast("Falha ao remover captura", "error");
   }
 }
 
-// Render functions
-function renderUrlsSection() {
+// -------------------------------------------------------------
+// Component Renderers (OpenAI Style Guide)
+// -------------------------------------------------------------
+
+function renderTopNav() {
   return `
-    <div class="space-y-4">
-      <div class="flex items-center justify-between">
-        <label class="text-base font-medium text-gray-900">Website URLs</label>
-        <div class="flex gap-2">
-          <button
-            onclick="loadSampleUrls()"
-            class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-          >
-            <i class="fas fa-magic mr-1"></i>Load Samples
-          </button>
-          <button
-            onclick="addUrl()"
-            class="px-3 py-1 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
-          >
-            <i class="fas fa-plus mr-1"></i>Add URL
-          </button>
+    <header class="sticky top-0 z-40 bg-paper/90 backdrop-blur-md border-b border-hairline">
+      <div class="max-w-[1200px] mx-auto px-6 h-16 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <span class="text-sm font-medium tracking-tight text-obsidian">Critical CSS</span>
+          <span class="text-[11px] font-medium tracking-normal text-graphite px-2 py-0.5 rounded-full border border-hairline bg-ash/50">
+            Drupal 1st Fold
+          </span>
         </div>
-      </div>
 
-      <div class="space-y-2">
-        ${state.urls
-          .map(
-            (url, index) => `
-          <div class="flex items-center gap-2">
-            <span class="text-sm text-gray-500 w-8">${index + 1}.</span>
-            <input
-              type="url"
-              placeholder="https://example.com"
-              value="${url}"
-              onchange="updateUrl(${index}, this.value)"
-              class="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            ${
-              state.urls.length > 1
-                ? `
-              <button
-                onclick="removeUrl(${index})"
-                class="px-2 py-2 text-red-600 hover:bg-red-50 rounded-md"
-                title="Remove URL"
-              >
-                <i class="fas fa-trash"></i>
-              </button>
-            `
-                : ""
-            }
-          </div>
-        `,
-          )
-          .join("")}
+        <nav class="flex items-center gap-2 sm:gap-4">
+          <a href="#config-section" class="btn-ghost text-xs hidden md:inline-flex text-graphite hover:text-obsidian">Configurações</a>
+          <a href="#capture-section" class="btn-ghost text-xs hidden md:inline-flex text-graphite hover:text-obsidian">Captura Manual</a>
+          
+          <button
+            onclick="handleBatchGenerate()"
+            ${state.isLoading ? "disabled" : ""}
+            class="btn-filled text-xs !py-1.5 !px-4"
+          >
+            ${state.isLoading ? '<i class="fas fa-spinner fa-spin text-xs"></i> Gerando...' : "Gerar CSS"}
+          </button>
+        </nav>
       </div>
-
-      <div class="text-sm text-gray-600">
-        <i class="fas fa-info-circle mr-1"></i>
-        ${
-          state.urls.filter((url) => url.trim() !== "").length
-        } valid URLs will be processed
-      </div>
-    </div>
+    </header>
   `;
 }
 
-function renderExcludedElementsSection() {
-  const hasSelectors =
-    state.excludedSelectors && state.excludedSelectors.length > 0;
+function renderHero() {
+  const hasUrls = state.urls.some((u) => u.trim() !== "");
 
   return `
-    <div class="space-y-3 pt-4 border-t border-gray-100">
-      <div class="flex items-center justify-between">
-        <div>
-          <label class="text-base font-medium text-gray-900 flex items-center">
-            <i class="fas fa-filter text-amber-500 mr-2"></i>
-            Elementos HTML Excluídos
-          </label>
-          <p class="text-xs text-gray-500 mt-0.5">
-            Tags e classes CSS que serão removidas do DOM antes da análise (não entrarão no CSS crítico).
-          </p>
-        </div>
-        <button
-          type="button"
-          onclick="resetExcludedSelectors()"
-          class="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1 font-medium hover:underline cursor-pointer"
-          title="Restaurar padrões (header, .modal)"
-        >
-          <i class="fas fa-rotate-left"></i> Restaurar padrões
-        </button>
+    <section class="pt-12 pb-8 sm:pt-16 sm:pb-12 text-left space-y-5">
+      <div class="space-y-3">
+        <div class="text-xs uppercase tracking-wider font-medium text-graphite">Research &amp; Performance Lab</div>
+        <h1 class="text-[34px] sm:text-[44px] md:text-[48px] font-medium text-obsidian tracking-[-1.44px] leading-[1.12]">
+          Critical CSS Generator
+        </h1>
+        <p class="text-graphite text-[17px] leading-[1.65] tracking-[-0.18px] max-w-2xl font-normal">
+          Extração padronizada de CSS da primeira dobra para blocos Drupal. Segregação limpa entre Mobile (&le;991.98px) e Desktop (&ge;992px), com isolamento estrito para respeitar o orçamento TCP de 14.6KB gzip.
+        </p>
       </div>
 
-      <!-- Tag list -->
-      <div class="flex flex-wrap items-center gap-2 min-h-[42px] p-2.5 bg-gray-50 rounded-lg border border-gray-200">
+      <!-- Quick action chip row (Bases prontas) -->
+      <div class="flex flex-wrap items-center gap-2 pt-1">
+        <button
+          onclick="addUrl()"
+          class="btn-outline text-xs !py-1.5 !px-3.5"
+        >
+          + Adicionar URL
+        </button>
+        <button
+          onclick="toggleBatchPaste()"
+          class="btn-outline text-xs !py-1.5 !px-3.5"
+        >
+          <i class="fas fa-list-ul text-xs text-graphite mr-1"></i>
+          <span>${state.showBatchPaste ? "Fechar Colar em Lote" : "Colar em Lote"}</span>
+        </button>
         ${
-          hasSelectors
-            ? state.excludedSelectors
-                .map(
-                  (selector, index) => `
-              <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-white text-gray-800 border border-gray-300 rounded-md text-xs font-mono font-medium shadow-sm hover:border-red-300 transition-colors">
-                <span>${selector}</span>
+          hasUrls || state.urls.length > 1
+            ? `
+          <button
+            onclick="clearUrls()"
+            class="btn-ghost text-xs text-graphite hover:text-obsidian !py-1.5 !px-3"
+          >
+            Limpar lista
+          </button>
+        `
+            : ""
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderUrlsSection() {
+  const validCount = state.urls.filter((u) => u.trim() !== "").length;
+
+  return `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between pb-1 flex-wrap gap-2">
+        <div>
+          <label class="text-sm font-medium text-obsidian">URLs de Destino</label>
+          <p class="text-xs text-graphite mt-0.5">Páginas que terão o CSS crítico extraído para primeira dobra</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button
+            onclick="toggleBatchPaste()"
+            class="btn-outline text-xs !py-1.5 !px-3"
+          >
+            <i class="fas fa-list-ul text-xs text-graphite mr-1"></i>
+            <span>${state.showBatchPaste ? "Modo Individual" : "Colar em Lote"}</span>
+          </button>
+          <button
+            onclick="addUrl()"
+            class="btn-outline text-xs !py-1.5 !px-3"
+          >
+            + Adicionar URL
+          </button>
+        </div>
+      </div>
+
+      ${
+        state.showBatchPaste
+          ? `
+        <div class="p-4 border border-hairline rounded-[6px] bg-ash/30 space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-obsidian">Cole uma lista de URLs (uma por linha):</span>
+            <span class="text-[11px] text-graphite">Linhas vazias serão ignoradas</span>
+          </div>
+          <textarea
+            id="batch-paste-textarea"
+            rows="6"
+            class="w-full font-mono text-xs p-3 bg-paper text-obsidian rounded-[6px] border border-hairline focus:outline-none focus:border-obsidian selection:bg-ash resize-y"
+            placeholder="https://example.com/pagina-1&#10;https://example.com/pagina-2&#10;https://example.com/pagina-3"
+          ></textarea>
+          <div class="flex items-center justify-end gap-2">
+            <button
+              onclick="toggleBatchPaste()"
+              class="btn-ghost text-xs !py-1.5 !px-3"
+            >
+              Cancelar
+            </button>
+            <button
+              onclick="applyBatchUrls(document.getElementById('batch-paste-textarea').value)"
+              class="btn-filled text-xs !py-1.5 !px-4"
+            >
+              Aplicar URLs
+            </button>
+          </div>
+        </div>
+      `
+          : `
+        <div class="space-y-2.5">
+          ${state.urls
+            .map(
+              (url, index) => `
+            <div class="relative flex items-center group">
+              <span class="absolute left-4 font-mono text-xs text-smoke select-none pointer-events-none">
+                ${(index + 1).toString().padStart(2, "0")}
+              </span>
+              <input
+                type="url"
+                placeholder="https://example.com/pagina"
+                value="${url}"
+                oninput="updateUrl(${index}, this.value)"
+                onkeydown="if(event.key === 'Enter'){ event.preventDefault(); addUrl(); }"
+                onpaste="handlePasteUrls(event, ${index})"
+                class="url-input input-prompt w-full pl-12 pr-12 text-sm text-obsidian placeholder:text-smoke bg-paper hover:border-black/30 transition-colors"
+              />
+              ${
+                state.urls.length > 1
+                  ? `
                 <button
-                  type="button"
-                  onclick="removeExcludedSelector(${index})"
-                  class="text-gray-400 hover:text-red-600 focus:outline-none p-0.5 rounded cursor-pointer"
-                  title="Remover '${selector}'"
+                  onclick="removeUrl(${index})"
+                  class="absolute right-3 p-1.5 text-smoke hover:text-obsidian rounded-full hover:bg-ash transition-colors"
+                  title="Remover URL"
                 >
                   <i class="fas fa-times text-xs"></i>
                 </button>
-              </span>
-            `,
-                )
-                .join("")
-            : `<span class="text-xs text-gray-400 italic">Nenhum seletor excluído (todo o HTML será considerado no CSS crítico).</span>`
-        }
-      </div>
-
-      <!-- Add new selector input -->
-      <div class="flex items-center gap-2">
-        <div class="relative flex-1">
-          <input
-            id="new-selector-input"
-            type="text"
-            placeholder="Ex: header, .modal, #cookie-banner, .popup"
-            class="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-            onkeydown="if(event.key === 'Enter') { event.preventDefault(); handleAddExcludedSelector(); }"
-          />
+              `
+                  : ""
+              }
+            </div>
+          `,
+            )
+            .join("")}
         </div>
-        <button
-          type="button"
-          onclick="handleAddExcludedSelector()"
-          class="px-3 py-1.5 text-sm bg-gray-800 text-white rounded-md hover:bg-gray-900 flex items-center gap-1.5 transition-colors cursor-pointer"
-        >
-          <i class="fas fa-plus text-xs"></i> Adicionar
-        </button>
+      `
+      }
+
+      <div class="flex items-center justify-between pt-1 text-xs text-graphite">
+        <span id="valid-urls-count">${validCount} URL${validCount === 1 ? "" : "s"} válida${validCount === 1 ? "" : "s"} para processamento</span>
+        ${
+          !state.showBatchPaste
+            ? `
+          <button
+            onclick="addUrl()"
+            class="text-obsidian font-medium hover:underline cursor-pointer"
+          >
+            + Adicionar mais uma URL
+          </button>
+        `
+            : ""
+        }
       </div>
     </div>
   `;
 }
 
 function renderConfigurationCard() {
+  const validUrls = state.urls.filter((url) => url.trim() !== "");
+
   return `
-    <div class="bg-white rounded-lg shadow-md p-6 space-y-6">
+    <div id="config-section" class="card-editorial p-6 sm:p-8 space-y-8">
       <div>
-        <h2 class="text-xl font-bold text-gray-900 mb-2">Batch Configuration</h2>
-        <p class="text-gray-600">Configure as URLs para gerar o CSS crítico da primeira dobra (desktop + mobile) em lote</p>
+        <h2 class="text-[22px] font-medium text-obsidian tracking-[-0.22px]">Configuração do Motor</h2>
+        <p class="text-graphite text-sm mt-1">Defina as regras de extração e otimização para o bloco Drupal</p>
       </div>
 
       ${renderUrlsSection()}
 
-      ${renderExcludedElementsSection()}
-
-      <div class="space-y-4">
-        <div class="flex items-center justify-between">
-          <label class="text-base font-medium text-gray-900">Generation Mode</label>
-        </div>
+      <!-- CSS Separation Mode -->
+      <div class="space-y-3 pt-4 border-t border-hairline">
+        <label class="text-sm font-medium text-obsidian">Modo de Separação de CSS</label>
         
-        <div class="flex items-center space-x-4">
-          <label class="flex items-center">
-            <input
-              type="radio"
-              name="mode"
-              value="individual"
-              ${!state.combineDimensions ? "checked" : ""}
-              onchange="state.combineDimensions = false; render();"
-              class="mr-2"
-            />
-            <span class="text-sm">Individual CSS for each device</span>
-          </label>
-          <label class="flex items-center">
-            <input
-              type="radio"
-              name="mode"
-              value="combined"
-              ${state.combineDimensions ? "checked" : ""}
-              onchange="state.combineDimensions = true; render();"
-              class="mr-2"
-            />
-            <span class="text-sm">Single CSS for all dimensions</span>
-          </label>
+        <div class="inline-flex p-1 bg-ash rounded-full border border-hairline">
+          <button
+            type="button"
+            onclick="state.combineDimensions = false; render();"
+            class="px-4 py-1.5 rounded-full text-xs font-medium transition-all ${
+              !state.combineDimensions
+                ? "bg-paper text-obsidian shadow-sm border border-hairline"
+                : "text-graphite hover:text-obsidian"
+            }"
+          >
+            Separar Mobile e Desktop (Recomendado Drupal)
+          </button>
+          <button
+            type="button"
+            onclick="state.combineDimensions = true; render();"
+            class="px-4 py-1.5 rounded-full text-xs font-medium transition-all ${
+              state.combineDimensions
+                ? "bg-paper text-obsidian shadow-sm border border-hairline"
+                : "text-graphite hover:text-obsidian"
+            }"
+          >
+            Combinar em arquivo único
+          </button>
         </div>
       </div>
 
-      <div class="space-y-3">
-        <label class="text-base font-medium text-gray-900">Device Configurations</label>
-        <div class="flex flex-wrap gap-3">
+      <!-- Viewports preset chips -->
+      <div class="space-y-3 pt-4 border-t border-hairline">
+        <div class="flex items-center justify-between">
+          <label class="text-sm font-medium text-obsidian">Viewports de Primeira Dobra</label>
+          <span class="text-xs text-graphite">Padronizado · 2 resoluções</span>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           ${Object.values(presetConfigs)
             .map(
               (config) => `
-            <div class="flex items-center gap-2 px-3 py-2 border rounded-lg bg-gray-50">
-              <i class="fas ${
-                config.device === "mobile"
-                  ? "fa-mobile-alt text-green-600"
-                  : "fa-desktop text-blue-600"
-              }"></i>
-              <div>
-                <div class="font-medium text-sm">${config.name}</div>
-                <div class="text-xs text-gray-500">${config.width} × ${config.height}</div>
+            <div class="p-3.5 border border-hairline rounded-[6px] bg-paper flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <i class="fas ${
+                  config.device === "mobile"
+                    ? "fa-mobile-screen text-obsidian"
+                    : "fa-desktop text-obsidian"
+                } text-sm"></i>
+                <div>
+                  <div class="text-sm font-medium text-obsidian">${config.name}</div>
+                  <div class="text-xs text-graphite">${config.width} &times; ${config.height}px</div>
+                </div>
               </div>
+              <span class="text-[11px] font-mono text-graphite px-2 py-0.5 rounded-full bg-ash border border-hairline">
+                ${config.device === "mobile" ? "&le;991.98px" : "&ge;992px"}
+              </span>
             </div>
           `,
             )
             .join("")}
         </div>
-        <div class="text-sm text-gray-600">
-          Padronizado para primeira dobra (desktop + mobile) em todas as URLs — não configurável.
+        <p class="text-xs text-graphite">
+          Configuração fixa para manter o CSS cirúrgico e evitar inchaço do pacote com viewports intermediários.
+        </p>
+      </div>
+
+      <!-- Performance & TCP Budget Controls -->
+      <div class="space-y-4 pt-4 border-t border-hairline">
+        <label class="text-sm font-medium text-obsidian flex items-center gap-2">
+          <span>Otimizações Avançadas de Performance</span>
+        </label>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <label class="flex items-start p-4 border border-hairline rounded-[6px] bg-paper hover:bg-ash/40 cursor-pointer transition">
+            <input
+              type="checkbox"
+              ${state.aggressivePruning ? "checked" : ""}
+              onchange="state.aggressivePruning = this.checked; render();"
+              class="mt-0.5 mr-3 h-4 w-4 rounded accent-black cursor-pointer"
+            />
+            <div class="space-y-1">
+              <div class="text-sm font-medium text-obsidian">Poda Agressiva de Regras</div>
+              <div class="text-xs text-graphite leading-relaxed">
+                Remove pseudo-classes (:hover, :active), regras @media print e variáveis CSS :root não referenciadas na primeira dobra. Reduz em até 60% o peso final.
+              </div>
+            </div>
+          </label>
+
+          <label class="flex items-start p-4 border border-hairline rounded-[6px] bg-paper hover:bg-ash/40 cursor-pointer transition">
+            <input
+              type="checkbox"
+              ${state.isolateFirstFold ? "checked" : ""}
+              onchange="state.isolateFirstFold = this.checked; render();"
+              class="mt-0.5 mr-3 h-4 w-4 rounded accent-black cursor-pointer"
+            />
+            <div class="space-y-1">
+              <div class="text-sm font-medium text-obsidian">Isolar Estritamente a 1ª Dobra</div>
+              <div class="text-xs text-graphite leading-relaxed">
+                Desativa o scroll prévio pelo navegador sem cabeça, impedindo que carrosséis inferiores, modais e scripts lazy injetem regras no CSS crítico.
+              </div>
+            </div>
+          </label>
+        </div>
+
+        <!-- TCP 14.6KB Guidance note -->
+        <div class="p-4 bg-ash/60 border border-hairline rounded-[6px] text-xs text-graphite flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2.5">
+            <span class="w-2 h-2 rounded-full bg-obsidian shrink-0"></span>
+            <span>
+              <strong class="text-obsidian font-medium">Janela Inicial TCP (initcwnd):</strong> 
+              Teto estrito de 14.6KB gzip por viewport. Meta ideal &le; 10KB para ser entregue com o HTML inicial no primeiro RTT.
+            </span>
+          </div>
+          <span class="font-mono text-[11px] px-2.5 py-0.5 rounded-full bg-paper border border-hairline text-obsidian font-medium">
+            Teto: 14.6KB Gzip
+          </span>
         </div>
       </div>
 
+      <!-- Processing indicator / progress bar -->
       ${
         state.batchProgress
           ? `
-        <div class="bg-blue-50 border border-blue-200 rounded-md p-4">
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-sm font-medium text-blue-900">Processing URLs...</span>
-            <span class="text-sm text-blue-700">${
-              state.batchProgress.completed
-            }/${state.batchProgress.total}</span>
+        <div class="space-y-2 pt-2">
+          <div class="flex items-center justify-between text-xs text-graphite">
+            <span class="font-medium text-obsidian">Processando URLs com navegador automatizado...</span>
+            <span class="font-mono">${state.batchProgress.completed} / ${state.batchProgress.total}</span>
           </div>
-          <div class="w-full bg-blue-200 rounded-full h-2">
+          <div class="w-full bg-ash rounded-full h-1.5 overflow-hidden">
             <div 
-              class="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+              class="bg-obsidian h-full transition-all duration-300 rounded-full" 
               style="width: ${
                 (state.batchProgress.completed / state.batchProgress.total) *
                 100
@@ -681,85 +839,33 @@ function renderConfigurationCard() {
           : ""
       }
 
-      <button
-        onclick="handleBatchGenerate()"
-        ${
-          state.isLoading ||
-          state.urls.filter((url) => url.trim() !== "").length === 0
-            ? "disabled"
-            : ""
-        }
-        class="w-full py-3 px-4 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        ${
-          state.isLoading
-            ? `
-          <i class="fas fa-spinner fa-spin mr-2"></i>
-          Processing ${
-            state.urls.filter((url) => url.trim() !== "").length
-          } URLs...
-        `
-            : `
-          <i class="fas fa-rocket mr-2"></i>
-          Generate Critical CSS for ${
-            state.urls.filter((url) => url.trim() !== "").length
-          } URLs
-        `
-        }
-      </button>
+      <!-- Primary Action CTA: Sole filled button in the page -->
+      <div class="pt-2">
+        <button
+          onclick="handleBatchGenerate()"
+          ${state.isLoading || validUrls.length === 0 ? "disabled" : ""}
+          class="btn-filled w-full !py-3.5 text-sm"
+        >
+          ${
+            state.isLoading
+              ? `
+            <i class="fas fa-spinner fa-spin text-xs"></i>
+            <span>Processando ${validUrls.length} URL${validUrls.length === 1 ? "" : "s"}...</span>
+          `
+              : `
+            <span>Gerar CSS Crítico para ${validUrls.length} URL${validUrls.length === 1 ? "" : "s"}</span>
+            <i class="fas fa-arrow-right text-xs"></i>
+          `
+          }
+        </button>
+      </div>
 
       ${
         state.error
           ? `
-        <div class="p-4 bg-red-50 border border-red-200 rounded-md">
-          <p class="text-red-800 text-sm">${state.error}</p>
-        </div>
-      `
-          : ""
-      }
-    </div>
-  `;
-}
-
-function renderManualCaptureSection() {
-  const bookmarkletHref = buildBookmarklet();
-
-  return `
-    <div class="bg-white rounded-lg shadow-md p-6 space-y-4">
-      <div>
-        <h2 class="text-xl font-bold text-gray-900 mb-2">Captura manual (URLs bloqueadas)</h2>
-        <p class="text-gray-600 text-sm">
-          Para domínios que bloqueiam até o navegador automatizado, arraste o botão abaixo para a barra de
-          favoritos, abra a URL bloqueada no seu navegador normal (sessão real, já logado) e clique nele.
-          A página capturada passa a ser usada automaticamente como alternativa ao gerar CSS para essa mesma URL.
-        </p>
-      </div>
-      <a
-        href="${bookmarkletHref}"
-        onclick="return false;"
-        class="inline-block px-4 py-2 bg-gray-800 text-white rounded-md text-sm cursor-move"
-        title="Arraste para a barra de favoritos"
-      >
-        <i class="fas fa-bookmark mr-2"></i>Capturar página (arraste-me para os favoritos)
-      </a>
-      ${
-        state.captures.length > 0
-          ? `
-        <div class="mt-4 space-y-2">
-          <div class="text-sm font-medium text-gray-900">Páginas capturadas (${state.captures.length})</div>
-          ${state.captures
-            .map(
-              (capture) => `
-            <div class="flex items-center justify-between p-2 border rounded-md text-sm">
-              <span class="truncate flex-1 mr-2" title="${capture.url}">${capture.url}</span>
-              <span class="text-gray-500 mr-2 whitespace-nowrap">${formatFileSize(capture.size)}</span>
-              <button class="delete-capture-btn text-red-600 hover:bg-red-50 px-2 py-1 rounded" data-url="${capture.url}">
-                <i class="fas fa-trash"></i>
-              </button>
-            </div>
-          `,
-            )
-            .join("")}
+        <div class="p-4 border border-rose-200 bg-rose-50/50 rounded-[6px] text-xs text-rose-800 flex items-start gap-2">
+          <i class="fas fa-circle-exclamation mt-0.5"></i>
+          <span>${state.error}</span>
         </div>
       `
           : ""
@@ -771,417 +877,327 @@ function renderManualCaptureSection() {
 function renderResults() {
   if (state.results.length === 0) return "";
 
-  const totalConfigs = state.results.reduce(
-    (sum, r) => sum + r.configs.length,
-    0,
-  );
-  const successfulConfigs = state.results.reduce(
-    (sum, r) => sum + r.configs.filter((c) => c.success).length,
-    0,
-  );
-  const cssResult = state.optimizedCSS;
+  const successfulUrls = state.results.filter((r) => r.success).length;
 
   return `
-    <div class="bg-white rounded-lg shadow-md p-6">
-      <div class="flex items-center justify-between mb-6">
+    <div id="results-section" class="card-editorial p-6 sm:p-8 space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-4 pb-2 border-b border-hairline">
         <div>
-          <h2 class="text-xl font-bold text-gray-900">Batch Results</h2>
-          <p class="text-gray-600">
-            Processed ${
-              state.results.length
-            } URLs • Generated ${successfulConfigs}/${totalConfigs} CSS files
+          <h2 class="text-[24px] font-semibold text-obsidian tracking-[0.31px]">CSS Crítico para Bloco Drupal</h2>
+          <p class="text-graphite text-xs mt-1">
+            ${successfulUrls} de ${state.results.length} URLs processadas com sucesso · Pronto para produção
           </p>
         </div>
-        <div class="flex gap-2">
+
+        <div class="flex items-center gap-2 flex-wrap">
           ${
             state.results.some((r) => !r.success) && state.lastJobId
               ? `
             <button
               onclick="handleRetryFailed()"
               ${state.isLoading ? "disabled" : ""}
-              class="px-4 py-2 border border-yellow-300 text-yellow-800 bg-yellow-50 rounded-md hover:bg-yellow-100 disabled:opacity-50"
+              class="btn-outline text-xs !py-1.5 !px-3"
             >
-              <i class="fas fa-redo mr-2"></i>Reprocessar falhas
+              <i class="fas fa-redo text-xs"></i> Reprocessar falhas
             </button>
           `
               : ""
           }
           <button
             onclick="exportBatchResults()"
-            class="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50"
+            class="btn-outline text-xs !py-1.5 !px-3"
           >
-            <i class="fas fa-file-export mr-2"></i>Export JSON
+            Exportar JSON
           </button>
           <button
             onclick="handleDownloadAll()"
-            ${successfulConfigs === 0 ? "disabled" : ""}
-            class="px-4 py-2 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+            ${successfulUrls === 0 ? "disabled" : ""}
+            class="btn-outline text-xs !py-1.5 !px-3 font-medium !bg-ash/70 hover:!bg-ash"
           >
-            <i class="fas fa-download mr-2"></i>Download All CSS
+            <i class="fas fa-download text-xs"></i> Baixar Todos (.html)
           </button>
         </div>
       </div>
 
-      <div class="space-y-6">
+      <!-- Results list -->
+      <div class="space-y-5">
         ${state.results
-          .map(
-            (urlResult, urlIndex) => `
-          <div class="border rounded-lg">
-            <div class="p-4 border-b bg-gray-50">
-              <div class="flex items-center gap-3">
-                ${
+          .map((urlResult, urlIndex) => {
+            const mobileConfig = urlResult.configs?.find(
+              (c) =>
+                c.success &&
+                (c.config?.device === "mobile" ||
+                  (c.config?.width && c.config.width < 768)),
+            );
+            const desktopConfig = urlResult.configs?.find(
+              (c) =>
+                c.success &&
+                (c.config?.device === "desktop" ||
+                  (c.config?.width && c.config.width >= 768)),
+            );
+
+            return `
+          <div class="border border-hairline rounded-[6px] overflow-hidden bg-paper">
+            <!-- URL Header -->
+            <div class="p-4 bg-ash/30 border-b border-hairline flex items-center justify-between flex-wrap gap-3">
+              <div class="flex items-center gap-3 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-full shrink-0 ${
                   urlResult.success
-                    ? '<i class="fas fa-check-circle text-green-500"></i>'
+                    ? "bg-emerald-500"
                     : urlResult.blocked
-                      ? '<i class="fas fa-shield-alt text-yellow-600"></i>'
-                      : '<i class="fas fa-times-circle text-red-500"></i>'
-                }
-                <div class="flex-1">
-                  <div class="font-medium">${
-                    new URL(urlResult.url).hostname
-                  }</div>
-                  <div class="text-sm text-gray-500">
-                    ${urlResult.url} • ${
-                      urlResult.configs.filter((c) => c.success).length
-                    }/${urlResult.configs.length} configs successful
-                    ${
+                      ? "bg-amber-500"
+                      : "bg-rose-500"
+                }"></span>
+                <div class="min-w-0">
+                  <div class="font-medium text-sm text-obsidian truncate">
+                    ${new URL(urlResult.url).hostname}
+                  </div>
+                  <div class="text-xs text-graphite truncate font-mono mt-0.5" title="${urlResult.url}">
+                    ${urlResult.url} ${
                       urlResult.processingTime
-                        ? ` • ${formatTime(urlResult.processingTime)}`
+                        ? `· ${formatTime(urlResult.processingTime)}`
                         : ""
                     }
                   </div>
                 </div>
+              </div>
+
+              <!-- Viewport budget badges -->
+              <div class="flex items-center gap-2 flex-wrap">
                 ${
-                  urlResult.strategy && urlResult.strategy !== "direct"
+                  mobileConfig
                     ? `
-                  <span class="px-2 py-1 text-xs rounded bg-indigo-100 text-indigo-800" title="Este resultado não veio de uma visita direta">
+                  <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-paper border border-hairline text-xs">
+                    <i class="fas fa-mobile-screen text-xs text-graphite"></i>
+                    <span class="text-graphite">Mobile:</span>
+                    <strong class="text-obsidian font-medium font-mono">${formatFileSize(
+                      mobileConfig.gzipSize,
+                    )}</strong>
                     ${
-                      urlResult.strategy === "proxy"
-                        ? "via proxy"
-                        : "via captura manual"
+                      mobileConfig.budget
+                        ? renderBudgetBadge(mobileConfig.budget)
+                        : ""
                     }
-                  </span>
+                  </div>
                 `
                     : ""
                 }
-                <span class="px-2 py-1 text-xs rounded ${
+                ${
+                  desktopConfig
+                    ? `
+                  <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-paper border border-hairline text-xs">
+                    <i class="fas fa-desktop text-xs text-graphite"></i>
+                    <span class="text-graphite">Desktop:</span>
+                    <strong class="text-obsidian font-medium font-mono">${formatFileSize(
+                      desktopConfig.gzipSize,
+                    )}</strong>
+                    ${
+                      desktopConfig.budget
+                        ? renderBudgetBadge(desktopConfig.budget)
+                        : ""
+                    }
+                  </div>
+                `
+                    : ""
+                }
+                <span class="px-2.5 py-1 text-xs font-medium rounded-full border border-hairline ${
                   urlResult.success
-                    ? "bg-green-100 text-green-800"
-                    : urlResult.blocked
-                      ? "bg-yellow-100 text-yellow-800"
-                      : "bg-red-100 text-red-800"
+                    ? "bg-paper text-obsidian"
+                    : "bg-rose-50 text-rose-800 border-rose-200"
                 }">
                   ${
                     urlResult.success
-                      ? "Success"
+                      ? "Sucesso"
                       : urlResult.blocked
-                        ? "Blocked"
-                        : "Failed"
+                        ? "Bloqueado"
+                        : "Falhou"
                   }
                 </span>
               </div>
-              ${
-                urlResult.error
-                  ? `
-                <div class="mt-3 p-3 ${
-                  urlResult.blocked
-                    ? "bg-yellow-50 border border-yellow-200"
-                    : "bg-red-50 border border-red-200"
-                } rounded-md">
-                  <p class="${
-                    urlResult.blocked ? "text-yellow-800" : "text-red-800"
-                  } text-sm">
-                    <strong>${
-                      urlResult.blocked
-                        ? "Bloqueado por proteção anti-bot:"
-                        : "Error:"
-                    }</strong> ${urlResult.error}
-                  </p>
-                </div>
-              `
-                  : ""
-              }
             </div>
-            
+
+            ${
+              urlResult.error
+                ? `
+              <div class="p-4 bg-rose-50/50 border-t border-rose-200 text-xs text-rose-800">
+                <strong>Erro:</strong> ${urlResult.error}
+              </div>
+            `
+                : ""
+            }
+
             ${
               urlResult.success
                 ? `
-              <div class="p-4">
-                <div class="space-y-4">
-                  ${urlResult.configs
-                    .map(
-                      (configResult, configIndex) => `
-                    <div class="border rounded-lg">
-                      <div class="p-3 border-b bg-gray-50">
-                        <div class="flex items-center gap-3">
-                          ${
-                            configResult.success
-                              ? '<i class="fas fa-check-circle text-green-500 text-sm"></i>'
-                              : '<i class="fas fa-times-circle text-red-500 text-sm"></i>'
-                          }
-                          <div class="flex-1">
-                            <div class="font-medium text-sm">${
-                              configResult.config.name
-                            }</div>
-                            <div class="text-xs text-gray-500">
-                              ${
-                                configResult.combined
-                                  ? `Combined dimensions: ${
-                                      configResult.config.dimensions
-                                        ?.map((d) => `${d.width}×${d.height}`)
-                                        .join(", ") || "Multiple"
-                                    }`
-                                  : `${configResult.config.width} × ${configResult.config.height}`
-                              }
-                              ${
-                                configResult.success
-                                  ? ` • ${formatFileSize(
-                                      configResult.css.length,
-                                    )}`
-                                  : " • Failed"
-                              }
-                            </div>
-                          </div>
-                          <span class="px-2 py-1 text-xs rounded ${
-                            configResult.config.device === "mobile"
-                              ? "bg-green-100 text-green-800"
-                              : configResult.config.device === "combined"
-                                ? "bg-purple-100 text-purple-800"
-                                : "bg-blue-100 text-blue-800"
-                          }">
-                            ${
-                              configResult.config.device === "combined"
-                                ? "Combined"
-                                : configResult.config.device
-                            }
-                          </span>
-                        </div>
-                      </div>
-                      
-                      <div class="p-3">
-                        ${
-                          configResult.success
-                            ? `
-                          <div class="space-y-3">
-                            <div class="flex gap-2">
-                              <button
-                                class="copy-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                                data-url-index="${urlIndex}"
-                                data-config-index="${configIndex}"
-                              >
-                                <i class="fas fa-copy mr-1"></i>Copy
-                              </button>
-                              <button
-                                class="download-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                                data-url-index="${urlIndex}"
-                                data-config-index="${configIndex}"
-                              >
-                                <i class="fas fa-download mr-1"></i>Download
-                              </button>
-                            </div>
-                            <textarea
-                              readonly
-                              class="w-full h-32 p-2 font-mono text-xs border border-gray-300 rounded-md bg-gray-50"
-                              placeholder="Critical CSS will appear here..."
-                            >${configResult.css}</textarea>
-                          </div>
-                        `
-                            : `
-                          <div class="p-3 bg-red-50 border border-red-200 rounded-md">
-                            <p class="text-red-800 text-xs">
-                              <strong>Error:</strong> ${
-                                configResult.error || "Unknown error occurred"
-                              }
-                            </p>
-                          </div>
-                        `
-                        }
-                      </div>
+              <div class="p-4 space-y-3">
+                <!-- Drupal Block HTML Snippet Container -->
+                <div class="border border-hairline rounded-[6px] overflow-hidden bg-[#0d0d0f] text-[#f4f4f5]">
+                  <div class="px-4 py-2.5 bg-[#17171a] border-b border-white/10 flex items-center justify-between flex-wrap gap-2">
+                    <div class="flex items-center gap-2">
+                      <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                      <span class="font-medium text-xs text-white">Código HTML para Bloco Drupal (&lt;style media&gt;)</span>
                     </div>
-                  `,
-                    )
-                    .join("")}
-                  ${
-                    urlResult.fullCss
-                      ? `
-                    <div class="border rounded-lg">
-                      <div class="p-3 border-b bg-gray-50">
-                        <div class="flex items-center gap-3">
-                          <i class="fas fa-file-code text-purple-600 text-sm"></i>
-                          <div class="flex-1">
-                            <div class="font-medium text-sm">CSS completo da página</div>
-                            <div class="text-xs text-gray-500">
-                              Todo o CSS usado pela página, não só o crítico acima da dobra
-                              • ${formatFileSize(urlResult.fullCss.size)}
-                            </div>
-                          </div>
-                          <span class="px-2 py-1 text-xs rounded bg-purple-100 text-purple-800">Full CSS</span>
-                        </div>
-                      </div>
-                      <div class="p-3">
-                        <div class="space-y-3">
-                          <div class="flex gap-2">
-                            <button
-                              class="copy-full-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                              data-url-index="${urlIndex}"
-                            >
-                              <i class="fas fa-copy mr-1"></i>Copy
-                            </button>
-                            <button
-                              class="download-full-btn px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                              data-url-index="${urlIndex}"
-                            >
-                              <i class="fas fa-download mr-1"></i>Download
-                            </button>
-                          </div>
-                          <textarea
-                            readonly
-                            class="w-full h-32 p-2 font-mono text-xs border border-gray-300 rounded-md bg-gray-50"
-                          >${urlResult.fullCss.css}</textarea>
-                        </div>
-                      </div>
+                    <div class="flex items-center gap-2">
+                      <button
+                        class="copy-html-block-btn px-3 py-1 text-xs rounded-full bg-white/10 hover:bg-white/20 text-white border border-white/20 transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
+                        data-url-index="${urlIndex}"
+                        title="Copiar snippet completo para o Drupal"
+                      >
+                        <i class="fas fa-copy text-xs"></i>
+                        <span>Copiar Bloco</span>
+                      </button>
+                      <button
+                        class="download-html-block-btn px-3 py-1 text-xs rounded-full bg-transparent hover:bg-white/10 text-white/80 border border-white/10 transition-all flex items-center gap-1.5 cursor-pointer"
+                        data-url-index="${urlIndex}"
+                        title="Baixar arquivo .html com o bloco"
+                      >
+                        <i class="fas fa-download text-xs"></i>
+                        <span>Baixar .html</span>
+                      </button>
                     </div>
-                  `
-                      : ""
-                  }
+                  </div>
+                  <div class="p-3">
+                    <textarea
+                      readonly
+                      rows="10"
+                      class="w-full font-mono text-xs p-3 bg-transparent text-[#e4e4e7] border-0 focus:outline-none selection:bg-white/20 resize-y leading-relaxed"
+                      spellcheck="false"
+                    >${buildHtmlMediaBlock(urlResult)}</textarea>
+                  </div>
+                  <div class="px-4 py-2 bg-[#121214] border-t border-white/5 flex items-center justify-between text-[11px] text-[#a1a1aa] flex-wrap gap-2">
+                    <span>Separação Mobile (&le;991.98px) e Desktop (&ge;992px) via <code>&lt;style media&gt;</code>. Render instantâneo sem FOUC.</span>
+                    <span class="font-mono text-white/70">Target: &le; 14.6KB gzip</span>
+                  </div>
                 </div>
               </div>
             `
                 : ""
             }
           </div>
-        `,
-          )
+        `;
+          })
           .join("")}
       </div>
-     <div class="space-y-6">
-    <div class="border rounded-lg">
-      <div class="p-4 border-b bg-gray-50">
-        <div class="flex items-center gap-3">
-          <i class="fas fa-check-circle text-green-500"></i>
-          <div class="flex-1">
-            <div class="font-medium">CSS Optimized</div>
-            <div class="text-sm text-gray-500">
-              Original Size: ${formatFileSize(cssResult.originalSize)} • Final Size: ${formatFileSize(
-                cssResult.size,
-              )} 
-            </div>
-          </div>
-          <span class="px-2 py-1 text-xs rounded bg-green-100 text-green-800">
-            Success
-          </span>
-        </div>
+
+      <!-- Drupal Deployment Guide Card -->
+      <div class="p-5 border border-hairline rounded-[6px] bg-ash/40 space-y-2">
+        <div class="text-xs font-semibold text-obsidian uppercase tracking-wider">Como aplicar no Drupal</div>
+        <ol class="list-decimal list-inside space-y-1 text-xs text-graphite leading-relaxed">
+          <li>Crie ou edite um bloco personalizado no Drupal (ex: <em>Bloco de CSS Crítico</em>).</li>
+          <li>Configure o Formato de Texto como <strong class="text-obsidian font-medium">Full HTML</strong> (para habilitar tags <code>&lt;style&gt;</code>).</li>
+          <li>Cole o código copiado acima no corpo do bloco e posicione na região de Topo (Header).</li>
+          <li>Ao carregar a folha completa de estilos assincronamente com <code>rel="preload"</code> e <code>onload</code>, este bloco evita Layout Shifts (CLS) e elimina bloqueio de renderização (FCP).</li>
+        </ol>
+      </div>
+    </div>
+  `;
+}
+
+function renderManualCaptureSection() {
+  const bookmarkletHref = buildBookmarklet();
+
+  return `
+    <div id="capture-section" class="card-editorial p-6 sm:p-8 space-y-5">
+      <div>
+        <h2 class="text-[22px] font-medium text-obsidian tracking-[-0.22px]">Captura Manual (Domínios com WAF / Anti-bot)</h2>
+        <p class="text-graphite text-sm mt-1 leading-relaxed">
+          Para páginas protegidas por Cloudflare Turnstile, Akamai ou Datadome que barram navegadores automatizados, arraste o botão abaixo para a sua barra de favoritos. Abra a URL desejada no seu navegador comum e clique nele: o HTML real e CSS compilado serão enviados diretamente para este painel.
+        </p>
+      </div>
+
+      <div>
+        <a
+          href="${bookmarkletHref}"
+          onclick="return false;"
+          class="btn-outline text-xs !py-2 !px-4 cursor-move inline-flex items-center gap-2"
+          title="Arraste para a barra de favoritos do navegador"
+        >
+          <i class="fas fa-bookmark text-xs text-graphite"></i>
+          <span>Capturar Página Crítica (arraste para os Favoritos)</span>
+        </a>
       </div>
 
       ${
-        cssResult.success
+        state.captures.length > 0
           ? `
-        <div class="border rounded-lg">
-          <div class="p-3">
-            <div class="space-y-3">
-              <div class="flex gap-2">
+        <div class="space-y-3 pt-3 border-t border-hairline">
+          <div class="text-xs font-medium text-obsidian uppercase tracking-wider">
+            Páginas Capturadas Manualmente (${state.captures.length})
+          </div>
+          <div class="space-y-2">
+            ${state.captures
+              .map(
+                (capture) => `
+              <div class="flex items-center justify-between p-3 border border-hairline rounded-[6px] bg-paper text-xs">
+                <span class="truncate flex-1 mr-3 font-mono text-obsidian" title="${capture.url}">${capture.url}</span>
+                <span class="text-graphite font-mono mr-3 whitespace-nowrap">${formatFileSize(capture.size)}</span>
                 <button
-                  class="copy-btn-optimized px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
+                  class="delete-capture-btn p-1.5 text-smoke hover:text-rose-600 rounded hover:bg-ash transition-colors"
+                  data-url="${capture.url}"
+                  title="Excluir captura"
                 >
-                  <i class="fas fa-copy mr-1"></i>Copy
-                </button>
-                <button
-                  class="download-btn-optimized px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50"
-                >
-                  <i class="fas fa-download mr-1"></i>Download
+                  <i class="fas fa-trash text-xs"></i>
                 </button>
               </div>
-              <textarea
-                readonly
-                class="w-full h-32 p-2 font-mono text-xs border border-gray-300 rounded-md bg-gray-50"
-                placeholder="Critical CSS will appear here..."
-              >${cssResult.css}</textarea>
-            </div>
+            `,
+              )
+              .join("")}
           </div>
         </div>
       `
           : ""
       }
     </div>
-  </div>
+  `;
+}
 
-      <div class="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-md">
-        <h4 class="font-medium text-blue-900 mb-2">Batch Processing Tips:</h4>
-        <ul class="text-sm text-blue-800 space-y-1 list-disc list-inside">
-          <li>Use combined dimensions mode for better performance when targeting multiple viewports</li>
-          <li>Process similar websites together for consistent results</li>
-          <li>Export results as JSON for further analysis or automation</li>
-          <li>Download all CSS files at once for easy deployment</li>
-        </ul>
+function renderFooter() {
+  return `
+    <footer class="mt-16 border-t border-hairline py-12 text-center text-xs text-graphite">
+      <div class="max-w-[1200px] mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div>
+          <span>Critical CSS Generator</span>
+          <span class="mx-2">·</span>
+          <span>OpenAI Design System Reference</span>
+        </div>
+        <div class="text-smoke">
+          Foco em Performance Web &amp; Core Web Vitals (LCP, CLS, FCP)
+        </div>
       </div>
-    </div>
+    </footer>
   `;
 }
 
 function render() {
   const app = document.getElementById("app");
-  app.innerHTML = `
-    <div class="max-w-6xl mx-auto p-4 space-y-6">
-      <div class="text-center space-y-2">
-        <div class="flex items-center justify-center gap-2">
-          <i class="fas fa-rocket text-2xl text-blue-600"></i>
-          <h1 class="text-3xl font-bold text-gray-900">Batch Critical CSS Generator</h1>
-        </div>
-        <p class="text-gray-600">
-          Generate critical CSS for multiple websites simultaneously with maximum agility
-        </p>
-      </div>
+  if (!app) return;
 
+  app.innerHTML = `
+    ${renderTopNav()}
+    <main class="max-w-[1200px] w-full mx-auto px-6 py-6 space-y-10 flex-1">
+      ${renderHero()}
       ${renderConfigurationCard()}
       ${renderResults()}
       ${renderManualCaptureSection()}
-    </div>
+    </main>
+    ${renderFooter()}
   `;
+
   attachEventListeners();
 }
 
 function attachEventListeners() {
-  document.querySelectorAll(".copy-btn").forEach((btn) => {
+  document.querySelectorAll(".copy-html-block-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const { urlIndex, configIndex } = btn.dataset;
-      const urlResult = state.results[urlIndex];
-      const configResult = urlResult.configs[configIndex];
-      handleCopy(configResult.css, configResult.config.name, urlResult.url);
-    });
-  });
-  document.querySelectorAll(".download-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const { urlIndex, configIndex } = btn.dataset;
-      const urlResult = state.results[urlIndex];
-      const configResult = urlResult.configs[configIndex];
-      handleDownload(configResult.css, configResult.config.name, urlResult.url);
+      const urlResult = state.results[btn.dataset.urlIndex];
+      handleCopyHtmlBlock(urlResult, btn);
     });
   });
 
-  document.querySelectorAll(".copy-full-btn").forEach((btn) => {
+  document.querySelectorAll(".download-html-block-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const urlResult = state.results[btn.dataset.urlIndex];
-      handleCopy(urlResult.fullCss.css, "Full CSS", urlResult.url);
-    });
-  });
-  document.querySelectorAll(".download-full-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const urlResult = state.results[btn.dataset.urlIndex];
-      handleDownload(urlResult.fullCss.css, "full", urlResult.url);
-    });
-  });
-
-  document.querySelectorAll(".copy-btn-optimized").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const result = state.optimizedCSS;
-      const urlsLength = `Total de Urls: ${result.totalUrls}`;
-      handleCopy(result.css, urlsLength, result.url);
-    });
-  });
-  document.querySelectorAll(".download-btn-optimized").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const result = state.optimizedCSS;
-      handleDownload(result.css, "optimized", result.url);
+      handleDownloadHtmlBlock(urlResult);
     });
   });
 
@@ -1192,24 +1208,23 @@ function attachEventListeners() {
   });
 }
 
-// Initialize the app
+// Initialization
 render();
 loadCaptures();
 
-// Make functions globally available
+// Global assignments for inline event handlers
 window.addUrl = addUrl;
 window.removeUrl = removeUrl;
+window.clearUrls = clearUrls;
 window.updateUrl = updateUrl;
-window.loadSampleUrls = loadSampleUrls;
+window.toggleBatchPaste = toggleBatchPaste;
+window.applyBatchUrls = applyBatchUrls;
+window.handlePasteUrls = handlePasteUrls;
 window.handleBatchGenerate = handleBatchGenerate;
-window.handleCopy = handleCopy;
-window.handleDownload = handleDownload;
+window.handleCopyHtmlBlock = handleCopyHtmlBlock;
+window.handleDownloadHtmlBlock = handleDownloadHtmlBlock;
 window.handleDownloadAll = handleDownloadAll;
 window.exportBatchResults = exportBatchResults;
 window.handleRetryFailed = handleRetryFailed;
 window.state = state;
 window.render = render;
-window.addExcludedSelector = addExcludedSelector;
-window.removeExcludedSelector = removeExcludedSelector;
-window.resetExcludedSelectors = resetExcludedSelectors;
-window.handleAddExcludedSelector = handleAddExcludedSelector;

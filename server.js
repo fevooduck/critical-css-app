@@ -27,6 +27,12 @@ import {
   buildCssIgnoreRules,
   filterCssByExcludedRules,
 } from './lib/html-cleaner.js';
+import {
+  optimizeCriticalCSS,
+  auditCssBudget,
+  TCP_INITCWND_CEILING_BYTES,
+  IDEAL_CRITICAL_GZIP_BYTES,
+} from './lib/css-optimizer.js';
 
 function hostnameOf(url) {
   try {
@@ -53,23 +59,11 @@ app.use(express.static('dist'));
 const batchJobs = new Map();
 await jobStore.loadInto(batchJobs);
 
-async function optimizeCSS(css) {
-  const result = await postcss([
-    combineSelectors({
-      removeDuplicatedProperties: true,
-    }),
-    cssnano({
-      preset: [
-        'default',
-        {
-          discardDuplicates: true,
-          mergeRules: true,
-          normalizeWhitespace: false,
-        },
-      ],
-    }),
-  ]).process(css);
-
+async function optimizeCSS(css, aggressivePruning = true) {
+  const result = await optimizeCriticalCSS(css, {
+    aggressivePruning,
+    combineDuplicates: true,
+  });
   return result.css;
 }
 
@@ -82,11 +76,14 @@ app.post('/api/critical/batch', async (req, res) => {
       combineDimensions = false,
       batchId,
       excludedSelectors = [
-        'header',
-        '#header',
         '.modal',
         '#onetrust-banner-sdk',
+        '.dropdown-content',
       ],
+      aggressivePruning = true,
+      isolateFirstFold = true,
+      targetLimit = TCP_INITCWND_CEILING_BYTES,
+      idealLimit = IDEAL_CRITICAL_GZIP_BYTES,
     } = req.body;
 
     if (!urls || !Array.isArray(urls) || urls.length === 0) {
@@ -131,6 +128,10 @@ app.post('/api/critical/batch', async (req, res) => {
       configs,
       combineDimensions,
       excludedSelectors,
+      aggressivePruning,
+      isolateFirstFold,
+      targetLimit,
+      idealLimit,
     });
     await jobStore.persist(batchJobs);
 
@@ -173,7 +174,9 @@ app.post('/api/critical/batch', async (req, res) => {
             html: renderedHtml,
             css: rawCss,
             strategy,
-          } = await runExclusive(hostname, () => resolvePage(url));
+          } = await runExclusive(hostname, () =>
+            resolvePage(url, { isolateFirstFold }),
+          );
 
           urlResults.strategy = strategy;
 
@@ -227,6 +230,14 @@ app.post('/api/critical/batch', async (req, res) => {
 
           const ignoreRules = buildCssIgnoreRules(excludedSelectors);
 
+          const declFilter = (node, value) => {
+            const isSvg = /\.svg/i.test(value);
+            const isAnimation = /animation|transition/i.test(node.prop);
+            const isLargeDataUri =
+              /data:(image|font)\//i.test(value) && value.length > 300;
+            return isSvg || isAnimation || isLargeDataUri;
+          };
+
           if (combineDimensions && configs.length > 1) {
             // Generate single CSS for multiple dimensions
             try {
@@ -249,36 +260,36 @@ app.post('/api/critical/batch', async (req, res) => {
                 inline: false,
                 extract: false,
                 ignoreInlinedStyles: false,
-                // We've already resolved every asset URL via the real browser
-                // render, so skip critical's own asset-rebasing pass (it's
-                // pointless here and, for CSS-in-JS-heavy pages, logs a
-                // "Not rebasing assets" warning containing the *entire* CSS
-                // text per inline stylesheet).
                 rebase: false,
                 ignore: {
                   atrule: ['@font-face', '@keyframes'],
                   rule: ignoreRules,
-                  decl: (node, value) => {
-                    const isSvg = /\.svg/.test(value);
-                    const isAnimation = /animation|transition/.test(node.prop);
-
-                    return isSvg || isAnimation;
-                  },
+                  decl: declFilter,
                 },
                 penthouse: {
                   getBrowser: getSharedBrowser,
                   userAgent: await getRealUserAgent(),
                   blockJSRequests: true, // 🚫 bloqueia JS externo (CSP, cookies, trackers)
-                  timeout: 180000, // aumenta o tempo limite (3min) — páginas com muito CSS (ex: SPAs com CSS-in-JS) demoram mais
+                  timeout: 180000, // aumenta o tempo limite (3min)
                   strict: false, // evita erros fatais por regras CSS inválidas
-                  renderWaitTime: 500, // espera um pouco mais antes de tirar o "snapshot"
+                  renderWaitTime: 500,
                   forceExclude: ignoreRules,
                 },
               });
 
-              const finalCss = filterCssByExcludedRules(
+              const filteredCss = filterCssByExcludedRules(
                 criticalCSS.css,
                 ignoreRules,
+              );
+
+              const { css: finalCss, audit } = await optimizeCriticalCSS(
+                filteredCss,
+                {
+                  aggressivePruning,
+                  combineDuplicates: true,
+                  targetLimit,
+                  idealLimit,
+                },
               );
 
               urlResults.configs.push({
@@ -292,11 +303,16 @@ app.post('/api/critical/batch', async (req, res) => {
                   dimensions: dimensions,
                 },
                 css: finalCss,
+                rawSize: audit.rawBytes,
+                gzipSize: audit.gzipBytes,
+                budget: audit,
                 success: true,
                 combined: true,
               });
 
-              console.log(`  ✅ Combined critical CSS generated successfully`);
+              console.log(
+                `  ✅ Combined critical CSS generated successfully (${audit.rawFormatted} raw, ${audit.gzipFormatted} gzip - ${audit.status.toUpperCase()})`,
+              );
             } catch (error) {
               console.error(
                 `  ❌ Error generating combined critical CSS:`,
@@ -333,7 +349,7 @@ app.post('/api/critical/batch', async (req, res) => {
                   ignore: {
                     atrule: ['@font-face', '@keyframes'],
                     rule: ignoreRules,
-                    decl: (node, value) => /big-image\.png/.test(value),
+                    decl: declFilter,
                   },
                   penthouse: {
                     getBrowser: getSharedBrowser,
@@ -346,20 +362,33 @@ app.post('/api/critical/batch', async (req, res) => {
                   },
                 });
 
-                const finalCss = filterCssByExcludedRules(
+                const filteredCss = filterCssByExcludedRules(
                   criticalCSS.css,
                   ignoreRules,
+                );
+
+                const { css: finalCss, audit } = await optimizeCriticalCSS(
+                  filteredCss,
+                  {
+                    aggressivePruning,
+                    combineDuplicates: true,
+                    targetLimit,
+                    idealLimit,
+                  },
                 );
 
                 urlResults.configs.push({
                   config,
                   css: finalCss,
+                  rawSize: audit.rawBytes,
+                  gzipSize: audit.gzipBytes,
+                  budget: audit,
                   success: true,
                   combined: false,
                 });
 
                 console.log(
-                  `  ✅ Critical CSS generated successfully for ${config.name}`,
+                  `  ✅ Critical CSS generated successfully for ${config.name} (${audit.rawFormatted} raw, ${audit.gzipFormatted} gzip - ${audit.status.toUpperCase()})`,
                 );
               } catch (error) {
                 console.error(
@@ -423,19 +452,29 @@ app.post('/api/critical/batch', async (req, res) => {
     );
     console.log(`📈 Total configurations generated: ${totalConfigs}`);
 
-    // Após processar todos os resultados, gere um CSS otimizado
-    const allCSS = results.reduce((combined, urlResult) => {
-      if (!urlResult.success) return combined;
-      const urlCSS = urlResult.configs.reduce((css, configResult) => {
-        if (!configResult.success) return css;
-        return css + `${configResult.css}`;
-      }, '');
+    // Global budget statistics across all processed configurations
+    let totalRawBytes = 0;
+    let totalGzipBytes = 0;
+    let budgetOptimalCount = 0;
+    let budgetWarningCount = 0;
+    let budgetExceededCount = 0;
 
-      return combined + urlCSS;
-    }, '');
+    results.forEach((r) => {
+      if (!r.success) return;
+      r.configs.forEach((c) => {
+        if (!c.success || !c.budget) return;
+        totalRawBytes += c.budget.rawBytes;
+        totalGzipBytes += c.budget.gzipBytes;
+        if (c.budget.status === 'optimal') budgetOptimalCount++;
+        else if (c.budget.status === 'warning') budgetWarningCount++;
+        else if (c.budget.status === 'exceeded') budgetExceededCount++;
+      });
+    });
 
-    // Otimize o CSS combinado
-    const optimizedCSS = await optimizeCSS(allCSS);
+    const primaryUrlResult = results.find((r) => r.success);
+    const primaryConfigResult = primaryUrlResult?.configs?.find((c) => c.success);
+    const primaryCss = primaryConfigResult?.css || '';
+    const primaryAudit = primaryConfigResult?.budget || auditCssBudget(primaryCss, targetLimit, idealLimit);
 
     res.json({
       jobId,
@@ -446,15 +485,28 @@ app.post('/api/critical/batch', async (req, res) => {
         totalConfigs: configs.length,
         successfulConfigs: totalConfigs,
         combineDimensions,
+        aggressivePruning,
+        isolateFirstFold,
         processingTime: job?.totalTime || 0,
+        budgetSummary: {
+          totalRawBytes,
+          totalGzipBytes,
+          budgetOptimalCount,
+          budgetWarningCount,
+          budgetExceededCount,
+          targetLimit,
+          idealLimit,
+        },
       },
       optimizedCSS: {
-        success: true,
-        css: optimizedCSS,
+        success: !!primaryCss,
+        css: primaryCss,
         totalUrls: urls.length,
-        url: urls[0],
-        size: Buffer.from(optimizedCSS).length,
-        originalSize: Buffer.from(allCSS).length,
+        url: primaryUrlResult?.url || urls[0],
+        size: primaryAudit.rawBytes,
+        gzipSize: primaryAudit.gzipBytes,
+        budget: primaryAudit,
+        originalSize: primaryConfigResult?.rawSize || primaryAudit.rawBytes,
       },
     });
   } catch (error) {
@@ -513,6 +565,10 @@ app.post('/api/critical/batch/:jobId/retry', async (req, res) => {
     configs: originalJob.configs,
     combineDimensions: originalJob.combineDimensions,
     excludedSelectors: originalJob.excludedSelectors,
+    aggressivePruning: originalJob.aggressivePruning !== false,
+    isolateFirstFold: originalJob.isolateFirstFold !== false,
+    targetLimit: originalJob.targetLimit,
+    idealLimit: originalJob.idealLimit,
   };
 
   return app._router.handle(
