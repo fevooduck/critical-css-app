@@ -1,5 +1,7 @@
 {
-  "ignore": ["data/*", "dist/*"],
+  "watch": ["server.js", "lib/"],
   "ext": "js,json",
+  "ignore": ["data/**", "dist/**", "base/**", "node_modules/**"],
+  "signal": "SIGTERM",
   "delay": "300"
 }

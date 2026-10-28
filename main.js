@@ -34,12 +34,23 @@ const state = {
   combineDimensions: false,
   aggressivePruning: true,
   isolateFirstFold: true,
+  ignoreHeadInlineStyles: true,
   batchProgress: null,
   currentJobId: null,
   lastJobId: null,
   captures: [],
   excludedSelectors: [...defaultExcludedSelectors],
   showBatchPaste: false,
+  tab: location.hash === "#validacao" ? "validate" : "generate",
+  validation: {
+    url: "",
+    blockHtml: "",
+    position: "body-start",
+    isRunning: false,
+    step: "",
+    report: null,
+    error: "",
+  },
 };
 
 // Minimalist OpenAI Toast Notification
@@ -72,6 +83,14 @@ function showToast(message, type = "success") {
     toast.style.transform = "translateY(8px)";
     setTimeout(() => toast.remove(), 250);
   }, 4000);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function formatFileSize(bytes) {
@@ -193,6 +212,87 @@ function handlePasteUrls(e, index) {
   }
 }
 
+// API helpers
+const JOB_POLL_INTERVAL_MS = 2000;
+const MAX_CONSECUTIVE_POLL_FAILURES = 15; // ~30s of backend unreachable
+
+// The Vite dev proxy answers an empty 500 when the backend (port 9001) is
+// down, which response.json() reports as "Unexpected end of JSON input".
+async function fetchJson(url, options) {
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch {
+    throw new Error(
+      "Não foi possível falar com o servidor. Verifique se o backend (porta 9001) está rodando.",
+    );
+  }
+
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    // non-JSON body (proxy error page, HTML fallback)
+  }
+
+  if (!data) {
+    throw new Error(
+      `O servidor não respondeu corretamente (HTTP ${response.status}). Verifique se o backend (porta 9001) está rodando — veja o terminal do "npm run dev".`,
+    );
+  }
+  if (!response.ok) {
+    throw new Error(data.error || `Erro HTTP ${response.status}`);
+  }
+  return data;
+}
+
+// Polls a batch job until it finishes, updating the progress bar on the way.
+// Tolerates short backend outages (e.g. nodemon restarting) instead of
+// failing on the first missed poll.
+async function waitForJob(jobId) {
+  let failures = 0;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+    let job;
+    try {
+      job = await fetchJson(`/api/critical/batch/${jobId}`);
+      failures = 0;
+    } catch (err) {
+      failures++;
+      if (failures >= MAX_CONSECUTIVE_POLL_FAILURES) throw err;
+      continue;
+    }
+
+    state.batchProgress = {
+      completed: job.progress.completed,
+      total: job.progress.total,
+    };
+    renderProgress();
+
+    if (job.status === "completed") return job;
+    if (job.status === "failed") {
+      throw new Error(job.error || "Falha ao gerar o CSS crítico");
+    }
+    if (job.status === "interrupted") {
+      throw new Error(
+        "O servidor foi reiniciado durante o processamento. Gere novamente.",
+      );
+    }
+  }
+}
+
+// Updates only the progress bar, so polling doesn't re-render the page (and
+// wipe text the user may be selecting) every two seconds.
+function renderProgress() {
+  const { completed, total } = state.batchProgress || {};
+  const label = document.getElementById("batch-progress-label");
+  const bar = document.getElementById("batch-progress-bar");
+  if (!label || !bar || !total) return render();
+  label.textContent = `${completed} / ${total}`;
+  bar.style.width = `${(completed / total) * 100}%`;
+}
+
 // Batch processing
 async function handleBatchGenerate() {
   const validUrls = state.urls.map((u) => u.trim()).filter((u) => u !== "");
@@ -222,7 +322,7 @@ async function handleBatchGenerate() {
       "info",
     );
 
-    const response = await fetch("/api/critical/batch", {
+    await fetchJson("/api/critical/batch", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -235,17 +335,15 @@ async function handleBatchGenerate() {
         excludedSelectors: state.excludedSelectors,
         aggressivePruning: state.aggressivePruning,
         isolateFirstFold: state.isolateFirstFold,
+        ignoreHeadInlineStyles: state.ignoreHeadInlineStyles,
+        async: true,
       }),
     });
 
-    const data = await response.json();
+    const data = await waitForJob(jobId);
 
-    if (!response.ok) {
-      throw new Error(data.error || "Falha ao gerar o CSS crítico");
-    }
-
-    state.results = data.results;
-    state.optimizedCSS = data.optimizedCSS || [];
+    // Results arrive in completion order; keep the order the URLs were typed.
+    state.results = [...data.results].sort((a, b) => a.urlIndex - b.urlIndex);
     state.batchProgress = null;
     state.lastJobId = data.jobId;
 
@@ -255,6 +353,7 @@ async function handleBatchGenerate() {
     );
   } catch (err) {
     state.error = err.message;
+    state.batchProgress = null;
     showToast(err.message, "error");
   } finally {
     state.isLoading = false;
@@ -409,15 +508,16 @@ async function handleRetryFailed() {
   render();
 
   try {
-    const response = await fetch(
+    const { jobId } = await fetchJson(
       `/api/critical/batch/${state.lastJobId}/retry`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ async: true }),
+      },
     );
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Falha ao reprocessar");
-    }
+    const data = await waitForJob(jobId);
+    state.batchProgress = null;
 
     const retriedByUrl = new Map(data.results.map((r) => [r.url, r]));
     state.results = state.results.map((r) => retriedByUrl.get(r.url) || r);
@@ -435,35 +535,79 @@ async function handleRetryFailed() {
 }
 
 // Manual capture bookmarklet
+// Runs in the user's own browser on the blocked page. Sends the rendered DOM
+// plus every stylesheet as a separate entry (so the "ignore <head> <style>"
+// option can still be applied server-side), skipping the critical blocks a
+// previous run of this tool generated. Tries to POST straight to the local
+// backend; when the page's CSP or Chrome's local-network protection blocks
+// that, it downloads the capture as a .json file to import in this UI.
 function buildBookmarklet() {
   const apiOrigin = `${location.protocol}//${location.hostname}:9001`;
   const code = `
     (function(){
       try {
-        var css=[];
+        var sheets=[]; var skipped=0;
+        var generatedMedia={'(max-width:991.98px)':1,'(min-width:992px)':1};
+        var rebase=function(css, base){
+          if(!base) return css;
+          return css.replace(/url\\(\\s*(['"]?)([^'")]+?)\\1\\s*\\)/gi,function(m,q,ref){
+            if(/^(data:|blob:|#|[a-z][a-z0-9+.-]*:)/i.test(ref)) return m;
+            try{ var r=new URL(ref,base); return 'url('+q+(r.origin===location.origin?r.pathname+r.search+r.hash:r.href)+q+')'; }catch(e){ return m; }
+          });
+        };
         for (var i=0;i<document.styleSheets.length;i++){
+          var sheet=document.styleSheets[i]; var owner=sheet.ownerNode;
+          if (owner && owner.tagName==='STYLE' && generatedMedia[(owner.getAttribute('media')||'').replace(/\\s+/g,'').toLowerCase()]) continue;
           try{
-            var rules=document.styleSheets[i].cssRules;
-            var t='';
-            for (var j=0;j<rules.length;j++) t+=rules[j].cssText;
-            css.push(t);
-          }catch(e){}
+            var rules=sheet.cssRules; var t='';
+            for (var j=0;j<rules.length;j++) t+=rules[j].cssText+'\\n';
+            var media=sheet.media&&sheet.media.mediaText;
+            if (media && media!=='all') t='@media '+media+'{'+t+'}';
+            sheets.push({css:rebase(t,sheet.href),href:sheet.href||null,inHead:!!(owner&&owner.tagName==='STYLE'&&owner.closest('head'))});
+          }catch(e){ skipped++; }
         }
         var clone=document.documentElement.cloneNode(true);
-        var junk=clone.querySelectorAll('link[rel=stylesheet], style, script');
-        junk.forEach(function(el){el.remove();});
-        var styleTag=document.createElement('style');
-        styleTag.textContent=css.join('\\n');
-        var head=clone.querySelector('head');
-        if (head) head.insertBefore(styleTag, head.firstChild);
-        var html='<html>'+clone.innerHTML+'</html>';
-        fetch('${apiOrigin}/api/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,html:html})})
-          .then(function(){alert('Pagina capturada! Volte ao Critical CSS Generator para reprocessar esta URL.');})
-          .catch(function(e){alert('Falha ao enviar captura: '+e.message);});
+        clone.querySelectorAll('link[rel=stylesheet], style, script').forEach(function(el){el.remove();});
+        var capture={url:location.href.split('#')[0],html:'<!DOCTYPE html>'+clone.outerHTML,sheets:sheets,skippedSheets:skipped,capturedAt:new Date().toISOString()};
+        var note=skipped?' Atencao: '+skipped+' folha(s) de CSS de outro dominio nao puderam ser lidas.':'';
+        var download=function(){
+          var a=document.createElement('a');
+          a.href=URL.createObjectURL(new Blob([JSON.stringify(capture)],{type:'application/json'}));
+          a.download='captura-'+location.hostname+(location.pathname.replace(/[^a-z0-9]+/gi,'-').replace(/-+$/,''))+'.json';
+          document.body.appendChild(a); a.click(); a.remove();
+          alert('O site bloqueou o envio direto, entao a captura foi BAIXADA como arquivo .json. No Critical CSS Generator, use "Importar captura (.json)".'+note);
+        };
+        fetch('${apiOrigin}/api/capture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(capture)})
+          .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); alert('Pagina capturada e enviada! Volte ao Critical CSS Generator e gere/reprocesse esta URL.'+note); })
+          .catch(download);
       } catch(e) { alert('Erro ao capturar: '+e.message); }
     })();
   `;
   return "javascript:" + encodeURIComponent(code.replace(/\s+/g, " ").trim());
+}
+
+// Imports capture files downloaded by the bookmarklet (fallback path).
+async function handleImportCaptures(input) {
+  const files = [...(input.files || [])];
+  input.value = "";
+  let imported = 0;
+  for (const file of files) {
+    try {
+      const capture = JSON.parse(await file.text());
+      await fetchJson("/api/capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(capture),
+      });
+      imported++;
+    } catch (err) {
+      showToast(`Falha ao importar ${file.name}: ${err.message}`, "error");
+    }
+  }
+  if (imported > 0) {
+    showToast(`${imported} captura${imported === 1 ? "" : "s"} importada${imported === 1 ? "" : "s"}.`);
+    await loadCaptures();
+  }
 }
 
 async function loadCaptures() {
@@ -492,6 +636,353 @@ async function handleDeleteCapture(url) {
 }
 
 // -------------------------------------------------------------
+// Visual validation (#validacao)
+// -------------------------------------------------------------
+
+const BLOCK_POSITIONS = {
+  "body-start": "Início do <body> (região de bloco do Drupal)",
+  "head-start": "Início do <head>",
+  "head-end": "Fim do <head>",
+};
+
+const VERDICTS = {
+  breaks: {
+    label: "Quebra em produção",
+    dot: "bg-rose-500",
+    text: "Com o bloco nesta posição, a página final fica diferente da original mesmo depois do CSS completo carregar.",
+  },
+  shift: {
+    label: "Layout shift na 1ª pintura",
+    dot: "bg-amber-500",
+    text: "A página final fica igual, mas antes do CSS completo chegar há elementos com tamanho/posição diferentes (CLS).",
+  },
+  visual: {
+    label: "Diferenças visuais na 1ª pintura",
+    dot: "bg-amber-300",
+    text: "A página final fica igual e o layout não se mexe; só cores/detalhes mudam até o CSS completo chegar.",
+  },
+  ok: {
+    label: "OK",
+    dot: "bg-emerald-500",
+    text: "Nenhuma diferença na página final nem na primeira dobra.",
+  },
+  error: { label: "Erro", dot: "bg-rose-500", text: "" },
+};
+
+function setTab(tab) {
+  state.tab = tab;
+  const hash = tab === "validate" ? "#validacao" : "";
+  if (location.hash !== hash) {
+    history.replaceState(null, "", hash || location.pathname);
+  }
+  render();
+  window.scrollTo(0, 0);
+}
+
+function openValidation(urlResult) {
+  if (!urlResult) return;
+  state.validation.url = urlResult.url;
+  state.validation.blockHtml = buildHtmlMediaBlock(urlResult);
+  state.validation.report = null;
+  state.validation.error = "";
+  setTab("validate");
+  runValidation();
+}
+
+async function runValidation() {
+  const v = state.validation;
+  if (v.isRunning) return;
+  v.url = v.url.trim();
+  v.isRunning = true;
+  v.error = "";
+  v.report = null;
+  v.step = "Iniciando...";
+  render();
+
+  try {
+    const { jobId } = await fetchJson("/api/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: v.url,
+        blockHtml: v.blockHtml,
+        position: v.position,
+      }),
+    });
+
+    let failures = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
+      let job;
+      try {
+        job = await fetchJson(`/api/validate/${jobId}`);
+        failures = 0;
+      } catch (err) {
+        if (++failures >= MAX_CONSECUTIVE_POLL_FAILURES) throw err;
+        continue;
+      }
+      if (job.status === "completed") {
+        v.report = job.report;
+        break;
+      }
+      if (job.status === "failed") throw new Error(job.error);
+      v.step = job.step;
+      const stepEl = document.getElementById("validation-step");
+      if (stepEl) stepEl.textContent = job.step;
+    }
+    showToast("Validação visual concluída.");
+  } catch (err) {
+    v.error = err.message;
+    showToast(err.message, "error");
+  } finally {
+    v.isRunning = false;
+    render();
+  }
+}
+
+function downloadValidationReport() {
+  const report = state.validation.report;
+  if (!report) return;
+  const blob = new Blob([JSON.stringify(report, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `validacao-${new URL(report.url).hostname}-${new Date()
+    .toISOString()
+    .slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
+function renderVerdictBadge(verdict) {
+  const v = VERDICTS[verdict] || VERDICTS.error;
+  return `<span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-ash border border-hairline text-obsidian">
+    <span class="w-1.5 h-1.5 rounded-full ${v.dot}"></span>${v.label}
+  </span>`;
+}
+
+function renderDiffGroups(groups, emptyText) {
+  if (!groups || groups.length === 0) {
+    return `<p class="text-xs text-graphite">${emptyText}</p>`;
+  }
+  return `
+    <div class="overflow-x-auto border border-hairline rounded-[6px]">
+      <table class="w-full text-xs">
+        <thead class="bg-ash/50 text-graphite text-left">
+          <tr>
+            <th class="px-3 py-2 font-medium">Qtd.</th>
+            <th class="px-3 py-2 font-medium">Elemento</th>
+            <th class="px-3 py-2 font-medium">Propriedade</th>
+            <th class="px-3 py-2 font-medium">Original</th>
+            <th class="px-3 py-2 font-medium">Com o bloco</th>
+          </tr>
+        </thead>
+        <tbody class="font-mono">
+          ${groups
+            .map(
+              (g) => `
+            <tr class="border-t border-hairline align-top">
+              <td class="px-3 py-1.5 text-graphite">${g.count}×</td>
+              <td class="px-3 py-1.5 text-obsidian break-all" title="${escapeHtml(g.path)}">${escapeHtml(g.element)}</td>
+              <td class="px-3 py-1.5 whitespace-nowrap">${escapeHtml(g.prop)}${
+                g.kind === "layout"
+                  ? ' <span class="text-amber-700 font-sans">(layout)</span>'
+                  : ""
+              }</td>
+              <td class="px-3 py-1.5 text-graphite break-all">${escapeHtml(g.before)}</td>
+              <td class="px-3 py-1.5 text-rose-700 break-all">${escapeHtml(g.after)}</td>
+            </tr>`,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderViewportReport(result, productionPosition) {
+  const { viewport } = result;
+  const header = `
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div class="flex items-center gap-2">
+        <i class="fas ${viewport.name === "mobile" ? "fa-mobile-screen" : "fa-desktop"} text-sm text-obsidian"></i>
+        <span class="text-sm font-medium text-obsidian capitalize">${viewport.name}</span>
+        <span class="text-xs text-graphite font-mono">${viewport.width}×${viewport.height}</span>
+      </div>
+      ${renderVerdictBadge(result.verdict)}
+    </div>`;
+
+  if (result.verdict === "error") {
+    return `<div class="border border-hairline rounded-[6px] p-5 space-y-3">${header}
+      <div class="p-3 bg-rose-50/50 border border-rose-200 rounded-[6px] text-xs text-rose-800">${escapeHtml(result.error)}</div></div>`;
+  }
+
+  const fc = result.finalCascade;
+  const fp = result.firstPaint;
+  const safePositions = Object.keys(BLOCK_POSITIONS).filter((p) => fc[p]?.diffCount === 0);
+  const prodBreaks = fc[productionPosition].diffCount > 0;
+
+  return `
+    <div class="border border-hairline rounded-[6px] p-5 space-y-6">
+      ${header}
+      <p class="text-xs text-graphite -mt-3">${VERDICTS[result.verdict].text}${
+        result.removedOldBlocks
+          ? ` · ${result.removedOldBlocks} bloco(s) crítico(s) antigo(s) já presente(s) na página foram removidos para o teste.`
+          : ""
+      }</p>
+
+      <!-- Test B -->
+      <div class="space-y-3">
+        <div>
+          <div class="text-sm font-medium text-obsidian">Teste B · Página final (depois que todo o CSS carrega)</div>
+          <div class="text-xs text-graphite mt-0.5">O bloco continua no HTML para sempre. Se ele vier depois das folhas completas no cascade, pode sobrescrever regras e quebrar a página.</div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          ${Object.entries(BLOCK_POSITIONS)
+            .map(([pos, label]) => {
+              const n = fc[pos].diffCount;
+              return `
+            <div class="p-3 border rounded-[6px] text-xs ${
+              pos === productionPosition ? "border-obsidian" : "border-hairline"
+            }">
+              <div class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full ${n === 0 ? "bg-emerald-500" : "bg-rose-500"}"></span>
+                <span class="font-medium text-obsidian">${n === 0 ? "Seguro" : `${n} diferença${n === 1 ? "" : "s"}`}</span>
+                ${pos === productionPosition ? '<span class="text-graphite">· posição escolhida</span>' : ""}
+              </div>
+              <div class="text-graphite mt-1">${escapeHtml(label)}</div>
+            </div>`;
+            })
+            .join("")}
+        </div>
+        ${
+          prodBreaks && safePositions.length > 0
+            ? `<div class="p-3 bg-amber-50/60 border border-amber-200 rounded-[6px] text-xs text-amber-900">
+                Na posição escolhida o bloco quebra a página, mas em <strong>${safePositions
+                  .map((p) => escapeHtml(BLOCK_POSITIONS[p]))
+                  .join(" / ")}</strong> não. Mude onde o bloco é impresso no Drupal, ou remova o bloco depois que o CSS completo carregar.
+              </div>`
+            : prodBreaks
+              ? `<div class="p-3 bg-rose-50/50 border border-rose-200 rounded-[6px] text-xs text-rose-800">
+                  O bloco altera a página final em qualquer posição: alguma regra do CSS crítico tem prioridade (especificidade ou <code>!important</code>) sobre a original. Ajuste os seletores excluídos ou remova o bloco depois que o CSS completo carregar.
+                </div>`
+              : ""
+        }
+        ${prodBreaks ? renderDiffGroups(fc[productionPosition].groups, "") : ""}
+      </div>
+
+      <!-- Test A -->
+      <div class="space-y-3 pt-4 border-t border-hairline">
+        <div>
+          <div class="text-sm font-medium text-obsidian">Teste A · Primeira pintura (só o CSS crítico, primeira dobra)</div>
+          <div class="text-xs text-graphite mt-0.5">O que o visitante vê antes das folhas completas chegarem.</div>
+        </div>
+        <div class="flex flex-wrap gap-2 text-xs">
+          <span class="px-2.5 py-1 rounded-full border border-hairline"><strong class="font-medium">${fp.counts.layout}</strong> <span class="text-graphite">de layout</span></span>
+          <span class="px-2.5 py-1 rounded-full border border-hairline"><strong class="font-medium">${fp.movedCount}</strong> <span class="text-graphite">elementos mudam de posição/tamanho</span></span>
+          <span class="px-2.5 py-1 rounded-full border border-hairline"><strong class="font-medium">${fp.counts.visual}</strong> <span class="text-graphite">visuais</span></span>
+          <span class="px-2.5 py-1 rounded-full border border-hairline" title="Fundos SVG/data URI removidos de propósito pelo gerador; chegam com o CSS completo"><strong class="font-medium">${fp.counts.expected}</strong> <span class="text-graphite">esperadas (fundos removidos de propósito)</span></span>
+          <span class="px-2.5 py-1 rounded-full border border-hairline"><strong class="font-medium">${fp.pixelDiff.percent}%</strong> <span class="text-graphite">dos pixels diferentes</span></span>
+        </div>
+        ${renderDiffGroups(fp.groups, "Nenhuma diferença de estilo na primeira dobra.")}
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          ${[
+            ["Original (CSS completo)", result.screenshots.original],
+            ["1ª pintura (só CSS crítico)", result.screenshots.firstPaint],
+            [`Diferença · ${fp.pixelDiff.percent}%`, result.screenshots.diff],
+          ]
+            .map(
+              ([label, b64]) => `
+            <figure class="space-y-1.5">
+              <figcaption class="text-xs text-graphite">${label}</figcaption>
+              <img src="data:image/jpeg;base64,${b64}" alt="${label}"
+                class="w-full max-h-[520px] object-contain object-top border border-hairline rounded-[6px] bg-ash" />
+            </figure>`,
+            )
+            .join("")}
+        </div>
+        <p class="text-[11px] text-graphite">Fontes web também chegam com o CSS completo, então diferenças de texto nas imagens são normais. A tabela compara os estilos computados e é a referência mais precisa.</p>
+      </div>
+    </div>`;
+}
+
+function renderValidationTab() {
+  const v = state.validation;
+  return `
+    <section class="pt-12 pb-2 space-y-3">
+      <div class="text-xs uppercase tracking-wider font-medium text-graphite">Garantia de qualidade</div>
+      <h1 class="text-[34px] sm:text-[44px] font-medium text-obsidian tracking-[-1.44px] leading-[1.12]">Validação Visual</h1>
+      <p class="text-graphite text-[17px] leading-[1.65] max-w-2xl">
+        Injeta o bloco gerado na página real e compara o estilo computado de cada elemento com a página original, em mobile e desktop. Use antes de publicar: se a página final mudar, o bloco vai quebrar o site.
+      </p>
+    </section>
+
+    <div class="card-editorial p-6 sm:p-8 space-y-5">
+      <div class="space-y-2">
+        <label class="text-sm font-medium text-obsidian">URL da página</label>
+        <input type="url" value="${escapeHtml(v.url)}" oninput="state.validation.url = this.value"
+          placeholder="https://www.recetasnestle.com.do/"
+          class="input-prompt w-full px-4 text-sm text-obsidian placeholder:text-smoke bg-paper" />
+        <p class="text-xs text-graphite">Para domínios com Akamai, use o ambiente sem WAF (ex.: <code>*.pantheonsite.io</code>).</p>
+      </div>
+      <div class="space-y-2">
+        <label class="text-sm font-medium text-obsidian">Bloco HTML do CSS crítico</label>
+        <textarea rows="8" oninput="state.validation.blockHtml = this.value" spellcheck="false"
+          placeholder='<style media="(max-width: 991.98px)">...</style>'
+          class="w-full font-mono text-xs p-3 bg-paper text-obsidian rounded-[6px] border border-hairline focus:outline-none focus:border-obsidian resize-y">${escapeHtml(v.blockHtml)}</textarea>
+        <p class="text-xs text-graphite">Preenchido automaticamente pelo botão "Validar visual" de cada resultado, ou cole um bloco já publicado.</p>
+      </div>
+      <div class="space-y-2">
+        <label class="text-sm font-medium text-obsidian">Onde o bloco fica em produção</label>
+        <select onchange="state.validation.position = this.value"
+          class="w-full sm:w-auto px-4 py-2.5 text-sm rounded-full border border-hairline bg-paper text-obsidian">
+          ${Object.entries(BLOCK_POSITIONS)
+            .map(
+              ([pos, label]) =>
+                `<option value="${pos}" ${v.position === pos ? "selected" : ""}>${escapeHtml(label)}</option>`,
+            )
+            .join("")}
+        </select>
+        <p class="text-xs text-graphite">As três posições são testadas; esta define o veredito e o Teste A.</p>
+      </div>
+      <button onclick="runValidation()" ${v.isRunning ? "disabled" : ""} class="btn-filled w-full !py-3.5 text-sm">
+        ${
+          v.isRunning
+            ? `<i class="fas fa-spinner fa-spin text-xs"></i> <span id="validation-step">${escapeHtml(v.step)}</span>`
+            : '<span>Validar bloco</span> <i class="fas fa-arrow-right text-xs"></i>'
+        }
+      </button>
+      ${
+        v.error
+          ? `<div class="p-4 border border-rose-200 bg-rose-50/50 rounded-[6px] text-xs text-rose-800 flex items-start gap-2">
+              <i class="fas fa-circle-exclamation mt-0.5"></i><span>${escapeHtml(v.error)}</span></div>`
+          : ""
+      }
+    </div>
+
+    ${
+      v.report
+        ? `
+      <div class="card-editorial p-6 sm:p-8 space-y-6">
+        <div class="flex items-center justify-between flex-wrap gap-3 pb-2 border-b border-hairline">
+          <div>
+            <h2 class="text-[22px] font-medium text-obsidian">Resultado</h2>
+            <p class="text-xs text-graphite font-mono mt-1">${escapeHtml(v.report.url)}</p>
+          </div>
+          <button onclick="downloadValidationReport()" class="btn-outline text-xs !py-1.5 !px-3">
+            <i class="fas fa-download text-xs"></i> Relatório (.json)
+          </button>
+        </div>
+        ${v.report.results.map((r) => renderViewportReport(r, v.report.position)).join("")}
+      </div>`
+        : ""
+    }
+  `;
+}
+
+// -------------------------------------------------------------
 // Component Renderers (OpenAI Style Guide)
 // -------------------------------------------------------------
 
@@ -507,8 +998,30 @@ function renderTopNav() {
         </div>
 
         <nav class="flex items-center gap-2 sm:gap-4">
-          <a href="#config-section" class="btn-ghost text-xs hidden md:inline-flex text-graphite hover:text-obsidian">Configurações</a>
-          <a href="#capture-section" class="btn-ghost text-xs hidden md:inline-flex text-graphite hover:text-obsidian">Captura Manual</a>
+          <div class="inline-flex p-1 bg-ash rounded-full border border-hairline">
+            ${[
+              ["generate", "Gerar"],
+              ["validate", "Validação Visual"],
+            ]
+              .map(
+                ([tab, label]) => `
+              <button
+                type="button"
+                onclick="setTab('${tab}')"
+                class="px-3.5 py-1 rounded-full text-xs font-medium transition-all ${
+                  state.tab === tab
+                    ? "bg-paper text-obsidian shadow-sm border border-hairline"
+                    : "text-graphite hover:text-obsidian"
+                }"
+              >${label}${
+                  tab === "validate" && state.validation.isRunning
+                    ? ' <i class="fas fa-spinner fa-spin text-[10px] ml-1"></i>'
+                    : ""
+                }</button>`,
+              )
+              .join("")}
+          </div>
+          <a href="#capture-section" onclick="setTab('generate')" class="btn-ghost text-xs hidden md:inline-flex text-graphite hover:text-obsidian">Captura Manual</a>
           
           <button
             onclick="handleBatchGenerate()"
@@ -799,6 +1312,21 @@ function renderConfigurationCard() {
               </div>
             </div>
           </label>
+
+          <label class="flex items-start p-4 border border-hairline rounded-[6px] bg-paper hover:bg-ash/40 cursor-pointer transition">
+            <input
+              type="checkbox"
+              ${state.ignoreHeadInlineStyles ? "checked" : ""}
+              onchange="state.ignoreHeadInlineStyles = this.checked; render();"
+              class="mt-0.5 mr-3 h-4 w-4 rounded accent-black cursor-pointer"
+            />
+            <div class="space-y-1">
+              <div class="text-sm font-medium text-obsidian">Ignorar &lt;style&gt; do &lt;head&gt;</div>
+              <div class="text-xs text-graphite leading-relaxed">
+                Monta o CSS crítico só a partir das folhas externas (e de &lt;style&gt; no &lt;body&gt;), descartando as tags &lt;style&gt; inline do &lt;head&gt; — ex.: um CSS crítico antigo já aplicado. Desative em sites que injetam CSS via JS (CSS-in-JS) no &lt;head&gt;.
+              </div>
+            </div>
+          </label>
         </div>
 
         <!-- TCP 14.6KB Guidance note -->
@@ -823,10 +1351,11 @@ function renderConfigurationCard() {
         <div class="space-y-2 pt-2">
           <div class="flex items-center justify-between text-xs text-graphite">
             <span class="font-medium text-obsidian">Processando URLs com navegador automatizado...</span>
-            <span class="font-mono">${state.batchProgress.completed} / ${state.batchProgress.total}</span>
+            <span id="batch-progress-label" class="font-mono">${state.batchProgress.completed} / ${state.batchProgress.total}</span>
           </div>
           <div class="w-full bg-ash rounded-full h-1.5 overflow-hidden">
-            <div 
+            <div
+              id="batch-progress-bar"
               class="bg-obsidian h-full transition-all duration-300 rounded-full" 
               style="width: ${
                 (state.batchProgress.completed / state.batchProgress.total) *
@@ -865,7 +1394,7 @@ function renderConfigurationCard() {
           ? `
         <div class="p-4 border border-rose-200 bg-rose-50/50 rounded-[6px] text-xs text-rose-800 flex items-start gap-2">
           <i class="fas fa-circle-exclamation mt-0.5"></i>
-          <span>${state.error}</span>
+          <span>${escapeHtml(state.error)}</span>
         </div>
       `
           : ""
@@ -957,6 +1486,10 @@ function renderResults() {
                       urlResult.processingTime
                         ? `· ${formatTime(urlResult.processingTime)}`
                         : ""
+                    }${
+                      urlResult.strategy === "manual-capture"
+                        ? ' · <span class="text-amber-700">via captura manual</span>'
+                        : ""
                     }
                   </div>
                 </div>
@@ -1020,7 +1553,7 @@ function renderResults() {
               urlResult.error
                 ? `
               <div class="p-4 bg-rose-50/50 border-t border-rose-200 text-xs text-rose-800">
-                <strong>Erro:</strong> ${urlResult.error}
+                <strong>Erro:</strong> ${escapeHtml(urlResult.error)}
               </div>
             `
                 : ""
@@ -1054,6 +1587,14 @@ function renderResults() {
                         <i class="fas fa-download text-xs"></i>
                         <span>Baixar .html</span>
                       </button>
+                      <button
+                        class="validate-block-btn px-3 py-1 text-xs rounded-full bg-transparent hover:bg-white/10 text-white/80 border border-white/10 transition-all flex items-center gap-1.5 cursor-pointer"
+                        data-url-index="${urlIndex}"
+                        title="Conferir se o bloco quebra algo visualmente"
+                      >
+                        <i class="fas fa-eye text-xs"></i>
+                        <span>Validar visual</span>
+                      </button>
                     </div>
                   </div>
                   <div class="p-3">
@@ -1062,7 +1603,7 @@ function renderResults() {
                       rows="10"
                       class="w-full font-mono text-xs p-3 bg-transparent text-[#e4e4e7] border-0 focus:outline-none selection:bg-white/20 resize-y leading-relaxed"
                       spellcheck="false"
-                    >${buildHtmlMediaBlock(urlResult)}</textarea>
+                    >${escapeHtml(buildHtmlMediaBlock(urlResult))}</textarea>
                   </div>
                   <div class="px-4 py-2 bg-[#121214] border-t border-white/5 flex items-center justify-between text-[11px] text-[#a1a1aa] flex-wrap gap-2">
                     <span>Separação Mobile (&le;991.98px) e Desktop (&ge;992px) via <code>&lt;style media&gt;</code>. Render instantâneo sem FOUC.</span>
@@ -1101,11 +1642,14 @@ function renderManualCaptureSection() {
       <div>
         <h2 class="text-[22px] font-medium text-obsidian tracking-[-0.22px]">Captura Manual (Domínios com WAF / Anti-bot)</h2>
         <p class="text-graphite text-sm mt-1 leading-relaxed">
-          Para páginas protegidas por Cloudflare Turnstile, Akamai ou Datadome que barram navegadores automatizados, arraste o botão abaixo para a sua barra de favoritos. Abra a URL desejada no seu navegador comum e clique nele: o HTML real e CSS compilado serão enviados diretamente para este painel.
+          Para páginas que barram o navegador automatizado (Akamai, Cloudflare, Datadome): arraste o botão abaixo para a barra de favoritos, abra a URL no seu navegador comum e clique nele. A captura é enviada direto para cá; se o site bloquear o envio, ela é baixada como arquivo <code>.json</code> para você importar aqui. Na próxima geração, se o acesso automático àquela URL for bloqueado, a captura é usada no lugar.
+        </p>
+        <p class="text-graphite text-xs mt-2 leading-relaxed">
+          Alternativa melhor quando existir: gere a partir de um ambiente sem WAF (ex.: <code>*.pantheonsite.io</code>). Os caminhos de imagens do próprio site saem relativos (<code>/themes/...</code>), então o bloco funciona em produção.
         </p>
       </div>
 
-      <div>
+      <div class="flex flex-wrap items-center gap-2">
         <a
           href="${bookmarkletHref}"
           onclick="return false;"
@@ -1115,6 +1659,11 @@ function renderManualCaptureSection() {
           <i class="fas fa-bookmark text-xs text-graphite"></i>
           <span>Capturar Página Crítica (arraste para os Favoritos)</span>
         </a>
+        <label class="btn-outline text-xs !py-2 !px-4 cursor-pointer inline-flex items-center gap-2">
+          <i class="fas fa-file-import text-xs text-graphite"></i>
+          <span>Importar captura (.json)</span>
+          <input type="file" accept=".json,application/json" multiple class="hidden" onchange="handleImportCaptures(this)" />
+        </label>
       </div>
 
       ${
@@ -1130,6 +1679,7 @@ function renderManualCaptureSection() {
                 (capture) => `
               <div class="flex items-center justify-between p-3 border border-hairline rounded-[6px] bg-paper text-xs">
                 <span class="truncate flex-1 mr-3 font-mono text-obsidian" title="${capture.url}">${capture.url}</span>
+                <span class="text-graphite mr-3 whitespace-nowrap">${capture.capturedAt ? new Date(capture.capturedAt).toLocaleString("pt-BR") : ""}</span>
                 <span class="text-graphite font-mono mr-3 whitespace-nowrap">${formatFileSize(capture.size)}</span>
                 <button
                   class="delete-capture-btn p-1.5 text-smoke hover:text-rose-600 rounded hover:bg-ash transition-colors"
@@ -1175,10 +1725,16 @@ function render() {
   app.innerHTML = `
     ${renderTopNav()}
     <main class="max-w-[1200px] w-full mx-auto px-6 py-6 space-y-10 flex-1">
-      ${renderHero()}
-      ${renderConfigurationCard()}
-      ${renderResults()}
-      ${renderManualCaptureSection()}
+      ${
+        state.tab === "validate"
+          ? renderValidationTab()
+          : `
+        ${renderHero()}
+        ${renderConfigurationCard()}
+        ${renderResults()}
+        ${renderManualCaptureSection()}
+      `
+      }
     </main>
     ${renderFooter()}
   `;
@@ -1198,6 +1754,12 @@ function attachEventListeners() {
     btn.addEventListener("click", () => {
       const urlResult = state.results[btn.dataset.urlIndex];
       handleDownloadHtmlBlock(urlResult);
+    });
+  });
+
+  document.querySelectorAll(".validate-block-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      openValidation(state.results[btn.dataset.urlIndex]);
     });
   });
 
@@ -1226,5 +1788,17 @@ window.handleDownloadHtmlBlock = handleDownloadHtmlBlock;
 window.handleDownloadAll = handleDownloadAll;
 window.exportBatchResults = exportBatchResults;
 window.handleRetryFailed = handleRetryFailed;
+window.handleImportCaptures = handleImportCaptures;
+window.setTab = setTab;
+window.runValidation = runValidation;
+window.downloadValidationReport = downloadValidationReport;
+
+window.addEventListener("hashchange", () => {
+  const tab = location.hash === "#validacao" ? "validate" : "generate";
+  if (tab !== state.tab) {
+    state.tab = tab;
+    render();
+  }
+});
 window.state = state;
 window.render = render;
