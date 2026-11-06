@@ -10,7 +10,8 @@
     "client": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package && npm run browsers",
+    "browsers": "puppeteer browsers install chrome && playwright install chromium-headless-shell"
   },
   "engines": {
     "node": ">=24"

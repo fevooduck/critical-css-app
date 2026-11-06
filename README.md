@@ -59,14 +59,15 @@ Requires **Node.js 24+** (see `.tool-versions`).
 ```bash
 nvm use 24
 npm install
-npx puppeteer browsers install chrome   # browser used to visit pages
-npx playwright install chromium         # browser used by critical to render
 npm run dev
 ```
 
-npm 11 (bundled with Node 24) no longer runs dependency install scripts by
-default, so Puppeteer's browser download has to be triggered explicitly. The
-project's own `postinstall` still runs and applies `patches/` (see below).
+`npm install` also applies `patches/` (see below) and downloads both
+browsers through the project's `postinstall`: Puppeteer's Chrome (visits
+pages) and Playwright's headless Chromium (critical renders with it). npm 11
+(bundled with Node 24) no longer runs the dependencies' own install scripts,
+so this can't be left to the packages. Browsers already in the cache are
+skipped; to re-download them alone, run `npm run browsers`.
 
 The UI runs on http://localhost:9000 (Vite) and proxies `/api` to the
 Express server on port 9001.
