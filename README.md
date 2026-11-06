@@ -30,36 +30,49 @@ A high-performance Critical CSS generator that processes **multiple websites sim
 ## 🛠 Installation & Usage
 
 ### Prepare WSL Ubuntu
-\`\`\`bash
-sudo apt update\
-sudo apt install -y \\
-  libnss3 \\
-  libatk-bridge2.0-0 \\
-  libxcomposite1 \\
-  libxrandr2 \\
-  libxdamage1 \\
-  libxss1 \\
-  libpangocairo-1.0-0 \\
-  libgtk-3-0 \\
-  libgbm-dev \\
-  libxshmfence-dev \\
-  libx11-xcb1 \\
-  libglu1-mesa \\
-  libasound2t64 \\
-  fonts-liberation \\
-  xdg-utils \\
-  wget\
-\`\`\`
+```bash
+sudo apt update
+sudo apt install -y \
+  libnss3 \
+  libatk-bridge2.0-0 \
+  libxcomposite1 \
+  libxrandr2 \
+  libxdamage1 \
+  libxss1 \
+  libpangocairo-1.0-0 \
+  libgtk-3-0 \
+  libgbm-dev \
+  libxshmfence-dev \
+  libx11-xcb1 \
+  libglu1-mesa \
+  libasound2t64 \
+  fonts-liberation \
+  xdg-utils \
+  wget
+```
+
+Or let Playwright install what Chromium needs: `sudo npx playwright install-deps chromium`.
 
 ### Quick Start
-\`\`\`bash
-nvm use 20
+Requires **Node.js 24+** (see `.tool-versions`).
+
+```bash
+nvm use 24
 npm install
+npx puppeteer browsers install chrome   # browser used to visit pages
+npx playwright install chromium         # browser used by critical to render
 npm run dev
-\`\`\`
+```
+
+npm 11 (bundled with Node 24) no longer runs dependency install scripts by
+default, so Puppeteer's browser download has to be triggered explicitly. The
+project's own `postinstall` still runs and applies `patches/` (see below).
+
+The UI runs on http://localhost:9000 (Vite) and proxies `/api` to the
+Express server on port 9001.
 
 ### Batch Processing Example
-\`\`\`javascript
+```javascript
 // Process 5 websites with 3 device configurations each
 const response = await fetch('/api/critical/batch', {
   method: 'POST',
@@ -80,7 +93,7 @@ const response = await fetch('/api/critical/batch', {
     combineDimensions: false // Generate individual CSS files
   })
 });
-\`\`\`
+```
 
 ## 🎯 Use Cases
 
@@ -110,36 +123,42 @@ const response = await fetch('/api/critical/batch', {
 ## 🔧 API Endpoints
 
 ### Batch Processing
-\`\`\`
+```
 POST /api/critical/batch
-\`\`\`
+```
 
 ### Job Status Monitoring
-\`\`\`
+```
 GET /api/critical/batch/:jobId
-\`\`\`
+```
 
 ### Retry Failed URLs
-\`\`\`
+```
 POST /api/critical/batch/:jobId/retry
-\`\`\`
+```
 
 ### Single URL (Backward Compatibility)
-\`\`\`
+```
 POST /api/critical
-\`\`\`
+```
 
 ### Manual Capture (fallback for blocked domains)
-\`\`\`
+```
 POST   /api/capture   { url, html }
 GET    /api/capture
 DELETE /api/capture   { url }
-\`\`\`
+```
 
 ### Domain Block History
-\`\`\`
+```
 GET /api/domain-info?url=...
-\`\`\`
+```
+
+### Visual Validation of a Generated Block
+```
+POST /api/validate        { url, blockHtml, position? }
+GET  /api/validate/:jobId
+```
 
 ## 📋 Sample Batch Configuration
 
@@ -192,3 +211,47 @@ alongside the critical CSS.
 Failed URLs in a completed batch can be reprocessed on their own via
 `POST /api/critical/batch/:jobId/retry`, without re-running the URLs that
 already succeeded.
+
+## ⚙️ How Generation Works
+
+1. **Snapshot** (`lib/browser-manager.js`) — Puppeteer visits the page and
+   collects every stylesheet over CDP into one self-contained HTML snapshot.
+   Shadow DOM styles (web components) are left out: flattened into the
+   document they would leak onto every matching element.
+2. **Critical extraction** (`lib/critical-generator.js`) — the snapshot is
+   rendered by [critical](https://github.com/addyosmani/critical) 9's `render`
+   engine (Playwright) at each viewport. Before that, scripts, inline handlers
+   and meta refreshes are stripped (the DOM is already rendered), iframes are
+   blanked, and a `<base href>` keeps relative images sized as on the real
+   page. critical 9 has no `ignore` option, so `@font-face`, `@keyframes`,
+   animation/transition declarations, SVG references, large data URIs and
+   the excluded selectors are removed from its output afterwards.
+3. **Optimization** (`lib/css-optimizer.js`) — PostCSS + cssnano pruning and
+   the gzip budget audit.
+4. **Cascade layer** — the result is wrapped in `@layer critical { … }`
+   (included in the budget). Layered rules always lose to the page's own
+   unlayered CSS, whatever their position, so the block can sit anywhere in
+   the document: if it lands after the full stylesheets, it can't re-assert a
+   rule the page overrides later (e.g. a generic `.cta` beating
+   `.cta--outline`). Before the full CSS loads the layer is all there is and
+   applies normally. Two things to keep in mind:
+   - Supported since 2022 (Chrome/Edge 99, Firefox 97, Safari 15.4); older
+     browsers ignore the block (no critical CSS, final page still correct).
+   - Inside a layer `!important` flips: a layered `!important` beats the
+     page's unlayered `!important`. The flags are kept anyway, since dropping
+     them breaks the first paint (utilities like `.hidden{display:none!important}`).
+
+   Pass `cascadeLayer: null` to `optimizeCriticalCSS` to get the bare CSS.
+
+### Local patch to critical
+
+`critical` is pinned to `9.0.0` and patched via
+[patch-package](https://github.com/ds300/patch-package)
+(`patches/critical+9.0.0.patch`, applied on `postinstall`). Its render engine
+only kept rules for elements whose box intersects the viewport, which drops
+the rules that **hide or move elements out of the fold** (`display:none`
+menus and slideshows, off-screen skip links), so they showed up at first
+paint. The patch judges a hidden element by its nearest rendered ancestor and
+uses penthouse's "starts before the fold ends" criterion. When upgrading
+critical, check whether upstream fixed this; if not, re-create the patch with
+`npx patch-package critical`.

@@ -1,14 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import * as critical from 'critical';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import {
-  getSharedBrowser,
   getRealUserAgent,
   closeSharedBrowser,
 } from './lib/browser-manager.js';
+import { generateCriticalCss } from './lib/critical-generator.js';
 import { resolvePage } from './lib/page-resolver.js';
 import { runExclusive } from './lib/hostname-lock.js';
 import * as jobStore from './lib/job-store.js';
@@ -26,7 +25,6 @@ import {
 import {
   removeExcludedElements,
   buildCssIgnoreRules,
-  filterCssByExcludedRules,
 } from './lib/html-cleaner.js';
 import {
   optimizeCriticalCSS,
@@ -49,16 +47,17 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 9001;
 
-// Express 4 doesn't catch rejected promises from async handlers; without
-// this a failed disk read in a route crashes the whole process.
-const asyncRoute = (handler) => (req, res, next) =>
-  Promise.resolve(handler(req, res, next)).catch(next);
-
 // Middleware
 app.use(helmet());
 app.use(cors());
 // Manual captures carry the full rendered DOM plus every stylesheet.
 app.use(express.json({ limit: '30mb' }));
+// Express 5 leaves req.body undefined when no JSON body was sent; routes
+// destructure it directly, so keep the Express 4 behavior of an empty object.
+app.use((req, res, next) => {
+  req.body ??= {};
+  next();
+});
 app.use(express.static('dist'));
 
 // Store active batch jobs (mirrored to disk via jobStore so history and
@@ -321,14 +320,7 @@ async function runBatch({
         }
 
         const ignoreRules = buildCssIgnoreRules(excludedSelectors);
-
-        const declFilter = (node, value) => {
-          const isSvg = /\.svg/i.test(value);
-          const isAnimation = /animation|transition/i.test(node.prop);
-          const isLargeDataUri =
-            /data:(image|font)\//i.test(value) && value.length > 300;
-          return isSvg || isAnimation || isLargeDataUri;
-        };
+        const userAgent = await getRealUserAgent();
 
         if (combineDimensions && configs.length > 1) {
           // Generate single CSS for multiple dimensions
@@ -345,34 +337,13 @@ async function runBatch({
             // Ignored stylesheets (library-svgs.css, print.css, ...) are
             // already dropped from the snapshot in visitUrl — see
             // IGNORED_STYLESHEETS in lib/browser-manager.js.
-            const criticalCSS = await critical.generate({
-              base: 'base/',
+            const filteredCss = await generateCriticalCss({
               html: cleanHtml,
-              dimensions: dimensions,
-              inline: false,
-              extract: false,
-              ignoreInlinedStyles: false,
-              rebase: false,
-              ignore: {
-                atrule: ['@font-face', '@keyframes'],
-                rule: ignoreRules,
-                decl: declFilter,
-              },
-              penthouse: {
-                getBrowser: getSharedBrowser,
-                userAgent: await getRealUserAgent(),
-                blockJSRequests: true, // 🚫 bloqueia JS externo (CSP, cookies, trackers)
-                timeout: 180000, // aumenta o tempo limite (3min)
-                strict: false, // evita erros fatais por regras CSS inválidas
-                renderWaitTime: 500,
-                forceExclude: ignoreRules,
-              },
-            });
-
-            const filteredCss = filterCssByExcludedRules(
-              criticalCSS.css,
+              pageUrl: url,
+              dimensions,
+              userAgent,
               ignoreRules,
-            );
+            });
 
             const { css: finalCss, audit } = await optimizeCriticalCSS(
               filteredCss,
@@ -430,35 +401,13 @@ async function runBatch({
                 `  🔄 Generating critical CSS for ${config.name} (${config.width}×${config.height})...`,
               );
 
-              const criticalCSS = await critical.generate({
-                base: 'base/',
+              const filteredCss = await generateCriticalCss({
                 html: cleanHtml,
-                width: config.width,
-                height: config.height,
-                inline: false,
-                extract: false,
-                ignoreInlinedStyles: false,
-                rebase: false,
-                ignore: {
-                  atrule: ['@font-face', '@keyframes'],
-                  rule: ignoreRules,
-                  decl: declFilter,
-                },
-                penthouse: {
-                  getBrowser: getSharedBrowser,
-                  userAgent: await getRealUserAgent(),
-                  blockJSRequests: true,
-                  timeout: 180000,
-                  strict: false,
-                  renderWaitTime: 500,
-                  forceExclude: ignoreRules,
-                },
-              });
-
-              const filteredCss = filterCssByExcludedRules(
-                criticalCSS.css,
+                pageUrl: url,
+                dimensions: [{ width: config.width, height: config.height }],
+                userAgent,
                 ignoreRules,
-              );
+              });
 
               const { css: finalCss, audit } = await optimizeCriticalCSS(
                 filteredCss,
@@ -693,7 +642,7 @@ app.post('/api/critical/batch/:jobId/retry', async (req, res) => {
 // Manual capture: a bookmarklet run from the user's own real browser posts
 // the rendered page here so a domain that blocks every automated path can
 // still be processed (used as the last fallback tier in resolvePage()).
-app.post('/api/capture', asyncRoute(async (req, res) => {
+app.post('/api/capture', async (req, res) => {
   const { url, html, sheets, skippedSheets, capturedAt } = req.body;
 
   if (!url || !html) {
@@ -712,30 +661,30 @@ app.post('/api/capture', asyncRoute(async (req, res) => {
 
   await saveCapture(url, { html, sheets, skippedSheets, capturedAt });
   res.json({ success: true });
-}));
+});
 
-app.get('/api/capture', asyncRoute(async (req, res) => {
+app.get('/api/capture', async (req, res) => {
   res.json({ captures: await listCaptures() });
-}));
+});
 
-app.delete('/api/capture', asyncRoute(async (req, res) => {
+app.delete('/api/capture', async (req, res) => {
   const { url } = req.body;
   if (!url) {
     return res.status(400).json({ error: 'url is required' });
   }
   await deleteCapture(url);
   res.json({ success: true });
-}));
+});
 
 // Per-domain block history, so the UI can warn upfront about domains that
 // have been blocking direct access
-app.get('/api/domain-info', asyncRoute(async (req, res) => {
+app.get('/api/domain-info', async (req, res) => {
   const { url } = req.query;
   if (!url) {
     return res.status(400).json({ error: 'url query param is required' });
   }
   res.json({ domain: await getDomainInfo(url) });
-}));
+});
 
 // Single URL endpoint (backward compatibility)
 app.post('/api/critical', async (req, res) => {
@@ -841,7 +790,7 @@ setInterval(async () => {
 }, 60 * 60 * 1000);
 
 // Serve the frontend
-app.get('*', (req, res) => {
+app.get('/{*splat}', (req, res) => {
   res.sendFile(join(__dirname, 'dist', 'index.html'));
 });
 
@@ -866,7 +815,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // Node exits on an unhandled rejection by default, and under nodemon a dead
 // server just sits at "app crashed" while every API call through the Vite
-// proxy fails with ECONNREFUSED. Stray errors from puppeteer/penthouse
+// proxy fails with ECONNREFUSED. Stray errors from puppeteer/playwright
 // internals (a page closing mid-render, a detached CDP session) are scoped to
 // one render, so log them loudly and keep serving instead.
 process.on('unhandledRejection', (reason) => {
