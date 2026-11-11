@@ -256,3 +256,11 @@ paint. The patch judges a hidden element by its nearest rendered ancestor and
 uses penthouse's "starts before the fold ends" criterion. When upgrading
 critical, check whether upstream fixed this; if not, re-create the patch with
 `npx patch-package critical`.
+
+## Fallback de fontes web (size-adjust / *-override)
+
+Usado no cookit/new_cookit (kit Typekit `kzf4sci`) seguindo a regra do purina.
+
+1. `node font-fallback-metrics.mjs --config data/font-fallback/config.json` — baixa as fontes alvo (só para medir, cache em `data/font-fallback/cache/`), calcula largura média num texto real da página e gera `metrics.json` (respeita USE_TYPO_METRICS).
+2. `node compare-font-fallback.mjs --config data/font-fallback/config.json` — renderiza alvo × fallback no Chromium, calibra o `size-adjust` pela largura renderizada (kerning) e grava os valores finais em `compare.json`.
+3. `node ab-typekit-embed.mjs --url <página> --fallback-css <main.css compilado> --runs 5` — A/B na página real (A = produção, B = embed CSS + fallback injetados). Requests do próprio domínio passam pelo fetch do Node (o WAF bloqueia headless), então ficam fora do throttling: confie em requests/KiB de fonte; LCP/CLS só como indício.

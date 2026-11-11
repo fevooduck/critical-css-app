@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "concurrently": "^10.0.6",
+    "fontkit": "^2.0.4",
     "nodemon": "^3.1.14",
     "patch-package": "^8.0.1",
     "vite": "^8.3.5"
