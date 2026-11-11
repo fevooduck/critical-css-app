@@ -26,6 +26,7 @@ import {
   removeExcludedElements,
   buildCssIgnoreRules,
 } from './lib/html-cleaner.js';
+import { detectPageFixes, appendPageFixes } from './lib/page-fixes.js';
 import {
   optimizeCriticalCSS,
   auditCssBudget,
@@ -322,6 +323,19 @@ async function runBatch({
         const ignoreRules = buildCssIgnoreRules(excludedSelectors);
         const userAgent = await getRealUserAgent();
 
+        // Third-party scripts with a known layout effect (GPT top anchor,
+        // OneTrust banner): their fix only goes into this page's critical CSS
+        // when the captured page actually loads them.
+        const pageFixes = detectPageFixes(renderedHtml);
+        urlResults.pageFixes = pageFixes.map(({ id, label, css }) => ({
+          id,
+          label,
+          applied: Boolean(css),
+        }));
+        for (const fix of pageFixes) {
+          console.log(`  🩹 ${fix.css ? 'Page fix' : 'Page fix skipped'}: ${fix.label}`);
+        }
+
         if (combineDimensions && configs.length > 1) {
           // Generate single CSS for multiple dimensions
           try {
@@ -346,7 +360,7 @@ async function runBatch({
             });
 
             const { css: finalCss, audit } = await optimizeCriticalCSS(
-              filteredCss,
+              appendPageFixes(filteredCss, pageFixes),
               {
                 aggressivePruning,
                 combineDuplicates: true,
@@ -410,7 +424,7 @@ async function runBatch({
               });
 
               const { css: finalCss, audit } = await optimizeCriticalCSS(
-                filteredCss,
+                appendPageFixes(filteredCss, pageFixes),
                 {
                   aggressivePruning,
                   combineDuplicates: true,

@@ -1497,6 +1497,19 @@ function renderResults() {
 
               <!-- Viewport budget badges -->
               <div class="flex items-center gap-2 flex-wrap">
+                ${(urlResult.pageFixes || [])
+                  .map(
+                    (fix) => `
+                  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border ${
+                    fix.applied
+                      ? "bg-paper border-hairline text-obsidian"
+                      : "bg-amber-50 border-amber-200 text-amber-800"
+                  }" title="${fix.label}">
+                    <i class="fas fa-${fix.applied ? "bandage" : "triangle-exclamation"} text-xs"></i>
+                    ${fix.id}
+                  </span>`,
+                  )
+                  .join("")}
                 ${
                   mobileConfig
                     ? `
