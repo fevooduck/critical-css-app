@@ -1,0 +1,21 @@
+{
+  "$comment": "Amostras do crítico por template do new_cookit (generate-templates.mjs). Uma URL por chave; a chave é a mesma de new_cookit_critical_css_template_key() em includes/critical-css.inc. logged=true usa o cookie de CRITICAL_SESSION_COOKIE.",
+  "base": "https://cookit-2.lndo.site",
+  "theme": "/home/codeduck/projects/nestle-cult/docroot/themes/custom/new_cookit",
+  "dimensions": [
+    { "width": 390, "height": 844 },
+    { "width": 1440, "height": 900 }
+  ],
+  "templates": {
+    "article--nes": { "url": "/artigos/como-fazer-nhoque" },
+    "article--qbqfnew": { "url": "/artigos/sopas-e-caldos" },
+    "article--vid": { "url": "/videos/basico-do-basico/aveioca" },
+    "article--aol": { "url": "/aulas-on-line/modulo-1-massas/aula-1-pao-de-lo" },
+    "article--aol--logged": { "url": "/aulas-on-line/modulo-1-massas/aula-1-pao-de-lo", "logged": true },
+    "recipe--br--gallery": { "url": "/receitas/pudim-de-leite-moca" },
+    "recipe--br--video": { "url": "/receitas/receita-frango-empanado-lemon-pepper" },
+    "recipe--br--single": { "url": "/receitas/receita-bisque-lagostim" },
+    "term--categories": { "url": "/nossas-receitas/bolos-e-tortas-doces" },
+    "term--categories--bc": { "url": "/marcas/leite-moca-nestle/receitas/bebidas-e-cafes" }
+  }
+}
