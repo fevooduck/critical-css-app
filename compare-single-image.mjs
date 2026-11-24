@@ -26,7 +26,8 @@ let totals = { pares: 0, regress: 0, resAntes: 0, resDepois: 0, nRes: 0 };
 for (const a of A) {
   const b = B.get(a.path);
   if (!b) { console.log(`! sem par no depois: ${a.path}`); continue; }
-  for (const vp of Object.keys(a.vp)) {
+  // só os viewports medidos nas duas rodadas (ex.: o depois pode ter só mobile e desktop)
+  for (const vp of Object.keys(a.vp).filter(v => v in b.vp)) {
     const va = a.vp[vp], vb = b.vp[vp];
     if (!va || !vb || va.error || vb.error) { console.log(`! erro ${a.path} ${vp}: ${va?.error || ''} ${vb?.error || ''}`); continue; }
     clsRows.push({ path: a.path, vp, antes: va.cls, depois: vb.cls });

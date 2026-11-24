@@ -23,7 +23,9 @@ const shotDir = `${outDir}/${phase}`;
 fs.mkdirSync(shotDir, { recursive: true });
 
 const pages = fs.readFileSync(pagesFile, 'utf8').trim().split('\n').map(l => l.split('\t')).map(([nid, bundle, qtd, path]) => ({ nid, path }));
-const VIEWPORTS = { mobile: { width: 393, height: 852 }, tablet: { width: 820, height: 1180 }, desktop: { width: 1440, height: 900 } };
+const ALL_VIEWPORTS = { mobile: { width: 393, height: 852 }, tablet: { width: 820, height: 1180 }, desktop: { width: 1440, height: 900 } };
+// VPS=mobile,desktop limita os viewports (padrão: todos)
+const VIEWPORTS = Object.fromEntries(Object.entries(ALL_VIEWPORTS).filter(([k]) => !process.env.VPS || process.env.VPS.split(',').includes(k)));
 
 const clsInit = () => {
   window.__cls = 0; window.__shifts = [];
@@ -59,9 +61,20 @@ const scrollAll = async page => {
   await page.waitForTimeout(1500);
 };
 
-const browser = await chromium.launch();
-const results = [];
-for (const p of pages) {
+// Navegador leve e reiniciado a cada RESTART_EVERY páginas (evita acumular memória no WSL).
+const LAUNCH = { args: ['--disable-gpu', '--disable-dev-shm-usage', '--renderer-process-limit=2', '--js-flags=--max-old-space-size=512'] };
+const RESTART_EVERY = Number(process.env.RESTART_EVERY || 8);
+let browser = await chromium.launch(LAUNCH);
+let sinceRestart = 0;
+// Retoma uma rodada interrompida: mantém o que já está no JSON da fase e pula essas páginas.
+const outFile = `${outDir}/${phase}.json`;
+// Páginas com erro em algum viewport (ex.: navegador caiu) são medidas de novo.
+const results = (fs.existsSync(outFile) ? JSON.parse(fs.readFileSync(outFile, 'utf8')) : [])
+  .filter(r => !Object.values(r.vp).some(v => v.error));
+const done = new Set(results.map(r => r.path));
+if (done.size) console.log(`retomando ${phase} ${hostName}: ${done.size} páginas já medidas`);
+for (const p of pages.filter(p => !done.has(p.path))) {
+  if (sinceRestart++ >= RESTART_EVERY) { await browser.close(); browser = await chromium.launch(LAUNCH); sinceRestart = 1; }
   const slug = p.path.replace(/^\/|\/$/g, '').replace(/\//g, '_') || 'home';
   const entry = { nid: p.nid, path: p.path, vp: {} };
   for (const [vpName, vp] of Object.entries(VIEWPORTS)) {
@@ -70,6 +83,14 @@ for (const p of pages) {
       // 1) carregamento normal: CLS + caixas finais + recortes
       const ctx = await browser.newContext({ viewport: vp, ignoreHTTPSErrors: true });
       const page = await ctx.newPage();
+      // FILES_FROM=https://cookit-2.lndo.site/sites/cookit-2/files busca as imagens de outro site
+      // (ex.: cookit-3 local não tem os arquivos, mas o cookit-2 tem os mesmos caminhos).
+      if (process.env.FILES_FROM) {
+        const prefix = `/sites/${hostName}/files/`;
+        await page.route(u => u.pathname.startsWith(prefix), route => route.request().resourceType() === 'image'
+          ? route.continue({ url: process.env.FILES_FROM.replace(/\/$/, '') + '/' + new URL(route.request().url()).pathname.slice(prefix.length) + new URL(route.request().url()).search })
+          : route.continue());
+      }
       await page.addInitScript(clsInit);
       const resp = await page.goto(host + p.path, { waitUntil: 'load', timeout: 120000 });
       r.status = resp && resp.status();
@@ -100,7 +121,7 @@ for (const p of pages) {
   }
   results.push(entry);
   const m = entry.vp.mobile || {};
-  console.log(`${phase} ${hostName} ${p.path} status=${m.status} cls(m/t/d)=${['mobile', 'tablet', 'desktop'].map(v => entry.vp[v].cls ?? 'err').join('/')} single-images=${(m.final || []).length}`);
+  console.log(`${phase} ${hostName} ${p.path} status=${m.status} cls(${Object.keys(VIEWPORTS).join('/')})=${Object.keys(VIEWPORTS).map(v => entry.vp[v].cls ?? 'err').join('/')} single-images=${(m.final || []).length}`);
   fs.writeFileSync(`${outDir}/${phase}.json`, JSON.stringify(results, null, 1));
 }
 await browser.close();
