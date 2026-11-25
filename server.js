@@ -25,6 +25,7 @@ import {
 import {
   removeExcludedElements,
   buildCssIgnoreRules,
+  resetCarouselState,
 } from './lib/html-cleaner.js';
 import { detectPageFixes, appendPageFixes } from './lib/page-fixes.js';
 import {
@@ -305,9 +306,14 @@ async function runBatch({
         }
 
         let cleanHtml = renderedHtml;
+        const carousel = resetCarouselState(cleanHtml);
+        cleanHtml = carousel.html;
+        if (carousel.clones || carousel.styles) {
+          console.log(`  🎠 Carrosséis: ${carousel.clones} clone(s) removido(s), ${carousel.styles} style inline zerado(s)`);
+        }
         if (Array.isArray(excludedSelectors) && excludedSelectors.length > 0) {
           const cleanResult = removeExcludedElements(
-            renderedHtml,
+            cleanHtml,
             excludedSelectors,
           );
           cleanHtml = cleanResult.html;
