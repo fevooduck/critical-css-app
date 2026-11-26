@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "postinstall": "patch-package && npm run browsers",
     "browsers": "puppeteer browsers install chrome && playwright install chromium-headless-shell",
-    "templates": "node generate-templates.mjs"
+    "templates": "node scripts/templates/generate-templates.mjs",
+    "templates:validate": "node scripts/templates/validate-templates.mjs"
   },
   "engines": {
     "node": ">=24"

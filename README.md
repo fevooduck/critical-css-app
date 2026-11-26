@@ -72,6 +72,23 @@ skipped; to re-download them alone, run `npm run browsers`.
 The UI runs on http://localhost:9000 (Vite) and proxies `/api` to the
 Express server on port 9001.
 
+### Project Layout
+
+```
+server.js, main.js, index.html   app (API Express + UI Vite)
+lib/                             pipeline do gerador (usado pelo app e pelos scripts)
+scripts/                         ferramentas CLI, por área — índice em scripts/README.md
+  templates/                     crítico por template do new_cookit (npm run templates)
+  drupal/                        inventários no banco via drush
+  theme-compare/                 tema novo × tema velho
+  audits/  perf/  components/    auditorias, performance, inspeção de componentes
+  legacy/                        experimentos antigos
+data/                            saídas e estado (ignorado pelo git)
+patches/                         patch local do critical
+```
+
+Run scripts from the project root: `node scripts/<area>/<script>`.
+
 ### Batch Processing Example
 ```javascript
 // Process 5 websites with 3 device configurations each
@@ -261,6 +278,6 @@ critical, check whether upstream fixed this; if not, re-create the patch with
 
 Usado no cookit/new_cookit (kit Typekit `kzf4sci`) seguindo a regra do purina.
 
-1. `node font-fallback-metrics.mjs --config data/font-fallback/config.json` — baixa as fontes alvo (só para medir, cache em `data/font-fallback/cache/`), calcula largura média num texto real da página e gera `metrics.json` (respeita USE_TYPO_METRICS).
-2. `node compare-font-fallback.mjs --config data/font-fallback/config.json` — renderiza alvo × fallback no Chromium, calibra o `size-adjust` pela largura renderizada (kerning) e grava os valores finais em `compare.json`.
-3. `node ab-typekit-embed.mjs --url <página> --fallback-css <main.css compilado> --runs 5` — A/B na página real (A = produção, B = embed CSS + fallback injetados). Requests do próprio domínio passam pelo fetch do Node (o WAF bloqueia headless), então ficam fora do throttling: confie em requests/KiB de fonte; LCP/CLS só como indício.
+1. `node scripts/perf/font-fallback-metrics.mjs --config data/font-fallback/config.json` — baixa as fontes alvo (só para medir, cache em `data/font-fallback/cache/`), calcula largura média num texto real da página e gera `metrics.json` (respeita USE_TYPO_METRICS).
+2. `node scripts/perf/compare-font-fallback.mjs --config data/font-fallback/config.json` — renderiza alvo × fallback no Chromium, calibra o `size-adjust` pela largura renderizada (kerning) e grava os valores finais em `compare.json`.
+3. `node scripts/perf/ab-typekit-embed.mjs --url <página> --fallback-css <main.css compilado> --runs 5` — A/B na página real (A = produção, B = embed CSS + fallback injetados). Requests do próprio domínio passam pelo fetch do Node (o WAF bloqueia headless), então ficam fora do throttling: confie em requests/KiB de fonte; LCP/CLS só como indício.
